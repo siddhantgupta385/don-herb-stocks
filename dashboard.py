@@ -1,3 +1,4 @@
+import logging
 import time
 from typing import Dict, List
 
@@ -6,6 +7,14 @@ import plotly.graph_objects as go
 import streamlit as st
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
+
+# Enable logging to see yfinance API calls
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Enable yfinance debug logging to see HTTP requests
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds to reduce API calls
@@ -25,6 +34,7 @@ def fetch_quotes(tickers: List[str]) -> pd.DataFrame:
     
     for t in tickers:
         ticker = yf.Ticker(t)
+        logger.info(f"🔍 Fetching quote data for {t} from Yahoo Finance...")
         
         # Retry logic for rate limiting
         for attempt in range(max_retries):
@@ -33,6 +43,16 @@ def fetch_quotes(tickers: List[str]) -> pd.DataFrame:
                 last_price = info.last_price
                 prev_close = info.previous_close
                 volume = info.last_volume
+                
+                # Validate we actually got data
+                if last_price is None or pd.isna(last_price):
+                    logger.warning(f"⚠️ Got empty data for {t}, retrying...")
+                    if attempt < max_retries - 1:
+                        time.sleep(base_delay)
+                        continue
+                    else:
+                        raise ValueError(f"No price data for {t}")
+                
                 pct_change = (
                     (last_price - prev_close) / prev_close * 100 if prev_close else 0.0
                 )
@@ -46,10 +66,13 @@ def fetch_quotes(tickers: List[str]) -> pd.DataFrame:
                         "currency": info.currency,
                     }
                 )
+                logger.info(f"✅ Successfully fetched quote data for {t}: ${last_price:.2f}")
                 break  # Success, exit retry loop
             except YFRateLimitError:
+                logger.warning(f"⚠️ Rate limited for {t}, attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
                     delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    logger.info(f"⏳ Waiting {delay}s before retry...")
                     time.sleep(delay)
                 else:
                     # Last attempt failed, add placeholder
@@ -229,7 +252,7 @@ def fetch_intraday_series(tickers: List[str]) -> Dict[str, pd.DataFrame]:
     return result
 
 
-@st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=60)  # Reduced cache time to 60 seconds
 def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: str = "1d") -> Dict[str, pd.DataFrame]:
     """
     Fetch historical price series for multiple tickers.
@@ -241,120 +264,17 @@ def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: s
         interval: Valid intervals: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo
     """
     result = {}
-    max_retries = 3  # More retries for historical data
-    base_delay = 3  # Longer base delay
+    max_retries = 2  # Reduced retries to speed up
+    base_delay = 1  # Shorter delay - we'll retry faster
     
-    # Try to download all tickers at once first using yf.download
-    df = None
-    batch_success = False
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            df = yf.download(
-                tickers=tickers,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=False,
-            )
-            if df is not None and not df.empty:
-                batch_success = True
-                break
-        except YFRateLimitError as e:
-            last_error = f"Rate limit error: {str(e)}"
-            if attempt < max_retries - 1:
-                delay = base_delay * (2 ** attempt)
-                time.sleep(delay)
-        except Exception as e:
-            last_error = f"Error: {str(e)}"
-            # For non-rate-limit errors, try once more with delay
-            if attempt < max_retries - 1:
-                time.sleep(base_delay)
-    
-    # If batch download failed, try individual Ticker().history() calls (more reliable)
-    if not batch_success and len(tickers) == 1:
-        try:
-            ticker_obj = yf.Ticker(tickers[0])
-            df = ticker_obj.history(
-                period=period,
-                interval=interval,
-                auto_adjust=False,
-            )
-            if df is not None and not df.empty:
-                batch_success = True
-        except Exception:
-            pass
-    
-    # Process batch result if successful
-    if batch_success and df is not None and not df.empty:
-        df = df.reset_index()
-        
-        # Handle MultiIndex columns (multiple tickers)
-        if isinstance(df.columns, pd.MultiIndex):
-            unique_tickers = df.columns.get_level_values(1).unique()
-            
-            for ticker in unique_tickers:
+    # Fetch tickers individually using Ticker().history() - most reliable method
+    # This avoids batch download rate limiting issues
+    for ticker in tickers:
+        ticker_success = False
+        for attempt in range(max_retries):
                 try:
-                    ticker_cols = [col for col in df.columns if col[1] == ticker]
-                    
-                    # Find time column
-                    time_col = None
-                    for col in df.columns:
-                        if isinstance(col, tuple) and col[0] in ["Datetime", "Date"]:
-                            time_col = col
-                            break
-                    
-                    if time_col is None:
-                        time_col = df.columns[0]
-                    
-                    cols_to_use = [time_col] + ticker_cols
-                    ticker_df = df[cols_to_use].copy()
-                    
-                    # Flatten column names
-                    new_cols = []
-                    for col in ticker_df.columns:
-                        if isinstance(col, tuple):
-                            new_cols.append(col[0])
-                        else:
-                            new_cols.append(col)
-                    ticker_df.columns = new_cols
-                    
-                    # Rename time column
-                    if "Datetime" in ticker_df.columns:
-                        ticker_df = ticker_df.rename(columns={"Datetime": "time"})
-                    elif "Date" in ticker_df.columns:
-                        ticker_df = ticker_df.rename(columns={"Date": "time"})
-                    elif len(ticker_df.columns) > 0:
-                        ticker_df = ticker_df.rename(columns={ticker_df.columns[0]: "time"})
-                    
-                    if "Close" in ticker_df.columns and not ticker_df.empty:
-                        result[ticker.upper()] = ticker_df[["time", "Close"]].copy()
-                except Exception:
-                    continue
-        else:
-            # Single ticker case
-            try:
-                if "Datetime" in df.columns:
-                    time_col = "Datetime"
-                elif "Date" in df.columns:
-                    time_col = "Date"
-                else:
-                    time_col = df.columns[0]
-                
-                df = df.rename(columns={time_col: "time"})
-                if "Close" in df.columns and not df.empty:
-                    result[tickers[0].upper()] = df[["time", "Close"]].copy()
-            except Exception:
-                pass
-    
-    # Fallback: fetch tickers individually using Ticker().history() (more reliable)
-    if not result:
-        for ticker in tickers:
-            ticker_success = False
-            for attempt in range(max_retries):
-                try:
-                    # Try using Ticker().history() first (often more reliable)
+                    # PRIMARY: Use Ticker().history() - most reliable method
+                    logger.info(f"🔍 Fetching historical data for {ticker} (period={period}, interval={interval}) from Yahoo Finance...")
                     ticker_obj = yf.Ticker(ticker)
                     ticker_df = ticker_obj.history(
                         period=period,
@@ -363,6 +283,7 @@ def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: s
                     )
                     
                     if ticker_df is not None and not ticker_df.empty:
+                        logger.info(f"✅ Successfully fetched {len(ticker_df)} data points for {ticker}")
                         ticker_df = ticker_df.reset_index()
                         
                         # Handle MultiIndex if present
@@ -379,19 +300,25 @@ def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: s
                         
                         if "Close" in ticker_df.columns and not ticker_df.empty:
                             result[ticker.upper()] = ticker_df[["time", "Close"]].copy()
+                            logger.info(f"✅ Added {ticker.upper()} to result with {len(ticker_df)} rows")
                             ticker_success = True
                             break
+                        else:
+                            logger.warning(f"⚠️ No 'Close' column found for {ticker} or DataFrame is empty")
+                    else:
+                        logger.warning(f"⚠️ Empty DataFrame returned for {ticker}")
                 except YFRateLimitError:
                     if attempt < max_retries - 1:
                         time.sleep(base_delay * (2 ** attempt))
                     else:
-                        # Last attempt: try yf.download as final fallback
+                        # Last attempt: try simpler period/interval as fallback
                         try:
-                            ticker_df = yf.download(
-                                tickers=ticker,
+                            # Try with simpler interval if current one failed
+                            simple_interval = "1d" if interval != "1d" else "1wk"
+                            ticker_obj = yf.Ticker(ticker)
+                            ticker_df = ticker_obj.history(
                                 period=period,
-                                interval=interval,
-                                progress=False,
+                                interval=simple_interval,
                                 auto_adjust=False,
                             )
                             if ticker_df is not None and not ticker_df.empty:
@@ -415,13 +342,13 @@ def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: s
                     if attempt < max_retries - 1:
                         time.sleep(base_delay)
                     else:
-                        # Last attempt: try yf.download as final fallback
+                        # Last attempt: try simpler period/interval
                         try:
-                            ticker_df = yf.download(
-                                tickers=ticker,
+                            simple_interval = "1d" if interval != "1d" else "1wk"
+                            ticker_obj = yf.Ticker(ticker)
+                            ticker_df = ticker_obj.history(
                                 period=period,
-                                interval=interval,
-                                progress=False,
+                                interval=simple_interval,
                                 auto_adjust=False,
                             )
                             if ticker_df is not None and not ticker_df.empty:
@@ -440,10 +367,14 @@ def fetch_historical_series(tickers: List[str], period: str = "1mo", interval: s
                         except Exception:
                             pass
                         break
-            
-            # Delay between tickers to avoid rate limiting
-            if ticker != tickers[-1]:
-                time.sleep(1.0)  # Longer delay between individual fetches
+        
+        # Delay between tickers to avoid rate limiting
+        if ticker != tickers[-1]:
+            time.sleep(0.5)  # Shorter delay for faster loading
+    
+    logger.info(f"📦 Returning historical data: {len(result)} tickers - {list(result.keys())}")
+    for ticker_key, df in result.items():
+        logger.info(f"  {ticker_key}: {len(df)} rows, columns: {list(df.columns)}")
     
     return result
 
@@ -483,8 +414,10 @@ def main() -> None:
                 quotes = pd.DataFrame()
         
         if quotes.empty:
+            logger.warning("⚠️ Quotes DataFrame is empty")
             st.error("No quote data returned.")
         elif quotes["price"].isna().any():
+            logger.warning(f"⚠️ Some quotes have NaN prices: {quotes[quotes['price'].isna()]['ticker'].tolist()}")
             st.warning("⚠️ Rate limited by Yahoo Finance. Some data may be missing. Please wait a moment and refresh.")
             # Show what we have
             quotes_display = quotes[~quotes["price"].isna()].copy()
@@ -525,12 +458,12 @@ def main() -> None:
         if not selected_tickers:
             st.info("Select at least one ticker to display the chart.")
         else:
-            # Data type selection
+            # Data type selection - Default to Historical (more reliable)
             data_type = st.radio(
                 "Chart type",
                 options=["Intraday", "Historical"],
                 horizontal=True,
-                index=0
+                index=1  # Default to Historical
             )
             
             # Period and interval selection for historical data
@@ -599,6 +532,7 @@ def main() -> None:
                         series_dict = {}
                 
                 if not series_dict:
+                    logger.warning(f"⚠️ No historical data returned for {selected_tickers}")
                     st.warning(
                         "⚠️ No historical data available. This may be due to:\n"
                         "- Rate limiting by Yahoo Finance (wait 30-60 seconds and try again)\n"
@@ -610,6 +544,7 @@ def main() -> None:
                         "- Wait 30-60 seconds if you see rate limit errors, then refresh"
                     )
                 else:
+                    logger.info(f"✅ Plotting chart with {len(series_dict)} tickers: {list(series_dict.keys())}")
                     _plot_chart(series_dict, selected_tickers, f"{chart_title_prefix} Price Comparison ({period})")
 
     # Note about Webull latency
@@ -625,6 +560,7 @@ def main() -> None:
 
 def _plot_chart(series_dict: Dict[str, pd.DataFrame], selected_tickers: List[str], title: str) -> None:
     """Helper function to plot chart from series dictionary."""
+    logger.info(f"📊 Plotting chart: {title} with {len(series_dict)} series")
     fig = go.Figure()
     
     # Color palette for different tickers
@@ -641,11 +577,14 @@ def _plot_chart(series_dict: Dict[str, pd.DataFrame], selected_tickers: List[str
         '#17becf',  # cyan
     ]
     
+    traces_added = 0
     for idx, ticker in enumerate(selected_tickers):
         if ticker in series_dict:
             series = series_dict[ticker]
+            logger.info(f"  Checking {ticker}: empty={series.empty}, has Close={'Close' in series.columns if not series.empty else False}")
             if not series.empty and "Close" in series.columns:
                 color = colors[idx % len(colors)]
+                logger.info(f"  ✅ Adding trace for {ticker} with {len(series)} points")
                 fig.add_trace(
                     go.Scatter(
                         x=series["time"],
@@ -655,8 +594,15 @@ def _plot_chart(series_dict: Dict[str, pd.DataFrame], selected_tickers: List[str
                         line=dict(color=color, width=2),
                     )
                 )
+                traces_added += 1
+            else:
+                logger.warning(f"  ⚠️ Skipping {ticker}: empty={series.empty}, has Close={'Close' in series.columns if not series.empty else False}")
+        else:
+            logger.warning(f"  ⚠️ {ticker} not found in series_dict. Available: {list(series_dict.keys())}")
     
+    logger.info(f"📊 Added {traces_added} traces to chart")
     if len(fig.data) == 0:
+        logger.error("❌ No valid data to plot - all series were empty or missing Close column")
         st.error("No valid data to plot.")
     else:
         fig.update_layout(
