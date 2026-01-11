@@ -390,17 +390,118 @@ def main() -> None:
         "Later you can plug in Webull or any other real-time feed."
     )
     st.info("ℹ️ **Note:** Data is cached for 60 seconds to reduce API calls. If you see rate limit errors, wait a moment before refreshing.")
+    
+    # Info about supported tickers
+    with st.expander("ℹ️ What tickers are supported?", expanded=False):
+        st.markdown("""
+        **This dashboard supports any ticker symbol available on Yahoo Finance, including:**
+        
+        - **U.S. Stocks**: AAPL, MSFT, TSLA, GOOGL, AMZN, etc.
+        - **International Stocks**: ASML, TSM, NVO, SAP, etc. (use Yahoo Finance format)
+        - **ETFs**: SPY, QQQ, VTI, VOO, etc.
+        - **Indices**: ^GSPC (S&P 500), ^DJI (Dow), ^IXIC (Nasdaq)
+        - **Crypto (via ETFs)**: GBTC, ETHE, BITO, COIN
+        - **Currencies**: EURUSD=X, GBPUSD=X, etc.
+        - **Commodities**: GC=F (Gold), CL=F (Crude Oil), etc.
+        
+        **To find ticker symbols:**
+        - Search on [Yahoo Finance](https://finance.yahoo.com)
+        - Use the Quick Add buttons below for popular options
+        - Type any valid Yahoo Finance ticker symbol
+        
+        **Note:** Some tickers may have different formats (e.g., indices use ^ prefix, currencies use =X suffix)
+        """)
 
-    default_tickers = "AAPL, MSFT, TSLA"
-    tickers_input = st.text_input("Tickers (comma separated)", value=default_tickers)
-    if st.button("Refresh quotes and chart"):
-        # This just causes the script to re-run with the same state.
-        st.rerun()
-
+    # Popular tickers organized by category
+    POPULAR_TICKERS = {
+        "Tech Giants": ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "NFLX"],
+        "Finance": ["JPM", "BAC", "WFC", "GS", "MS", "C", "V", "MA"],
+        "Healthcare": ["JNJ", "PFE", "UNH", "ABBV", "MRK", "TMO", "ABT", "LLY"],
+        "Consumer": ["WMT", "HD", "MCD", "NKE", "SBUX", "TGT", "COST", "LOW"],
+        "Energy": ["XOM", "CVX", "COP", "SLB", "EOG", "MPC", "VLO", "PSX"],
+        "Industrials": ["BA", "CAT", "GE", "HON", "LMT", "RTX", "DE", "EMR"],
+        "Indices & ETFs": ["SPY", "QQQ", "DIA", "IWM", "VTI", "VOO", "VEA", "VWO"],
+        "Crypto (via ETFs)": ["GBTC", "ETHE", "BITO", "COIN"],
+        "International": ["ASML", "TSM", "NVO", "SAP", "UL", "BP", "SHEL", "TM"],
+    }
+    
+    # Flatten all popular tickers for easy access
+    ALL_POPULAR_TICKERS = [ticker for category in POPULAR_TICKERS.values() for ticker in category]
+    
+    st.subheader("📊 Ticker Selection")
+    
+    # Two-column layout for ticker selection
+    col_ticker_input, col_quick_add = st.columns([2, 1])
+    
+    with col_ticker_input:
+        default_tickers = "AAPL, MSFT, TSLA"
+        tickers_input = st.text_input(
+            "Enter ticker symbols (comma separated)", 
+            value=default_tickers,
+            help="Type any stock ticker symbol available on Yahoo Finance. Examples: AAPL, MSFT, TSLA, GOOGL, AMZN, SPY, QQQ. You can also search for international stocks, ETFs, and more!"
+        )
+        
+        # Show autocomplete suggestions
+        if tickers_input:
+            current_input = tickers_input.split(",")[-1].strip().upper()
+            if current_input and len(current_input) >= 1:
+                # Find matching popular tickers
+                matches = [t for t in ALL_POPULAR_TICKERS if t.startswith(current_input)][:5]
+                if matches:
+                    st.caption(f"💡 Suggestions: {', '.join(matches)}")
+    
+    with col_quick_add:
+        st.markdown("<br>", unsafe_allow_html=True)  # Spacing
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+    
+    # Quick add popular tickers with expandable sections
+    with st.expander("🚀 Quick Add Popular Tickers (Click to expand)", expanded=False):
+        cols = st.columns(3)
+        
+        category_idx = 0
+        for category, ticker_list in POPULAR_TICKERS.items():
+            col = cols[category_idx % 3]
+            with col:
+                # Show category with ticker count
+                st.markdown(f"**{category}** ({len(ticker_list)} tickers)")
+                
+                # Create buttons for each ticker in this category
+                for ticker in ticker_list[:4]:  # Show first 4, rest in tooltip
+                    current_tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+                    if ticker not in current_tickers:
+                        if st.button(f"➕ {ticker}", key=f"add_{ticker}", use_container_width=True):
+                            current_tickers.append(ticker)
+                            st.session_state['tickers_input'] = ", ".join(current_tickers)
+                            st.rerun()
+                    else:
+                        st.button(f"✓ {ticker}", key=f"added_{ticker}", use_container_width=True, disabled=True)
+                
+                # Show "more" if there are more tickers
+                if len(ticker_list) > 4:
+                    remaining = ", ".join(ticker_list[4:])
+                    st.caption(f"Also: {remaining}")
+            
+            category_idx += 1
+    
+    # Use session state to preserve ticker input if quick-add was used
+    if 'tickers_input' in st.session_state:
+        tickers_input = st.session_state['tickers_input']
+        del st.session_state['tickers_input']  # Clear after use
+    
     tickers = [t.strip().upper() for t in tickers_input.split(",") if t.strip()]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    tickers = [t for t in tickers if not (t in seen or seen.add(t))]
+    
     if not tickers:
-        st.warning("Enter at least one ticker symbol.")
+        st.warning("Enter at least one ticker symbol or use the Quick Add buttons above.")
         return
+    
+    # Show selected tickers
+    if len(tickers) > 0:
+        st.info(f"📈 **Selected Tickers ({len(tickers)}):** {', '.join(tickers)}")
 
     # Main layout: left = table, right = chart
     col_table, col_chart = st.columns([1, 2], gap="large")
@@ -449,11 +550,29 @@ def main() -> None:
             )
 
     with col_chart:
+        st.subheader("📈 Chart Configuration")
+        
+        # Enhanced ticker selection with search and popular options
+        st.markdown("**Select tickers to display on chart:**")
+        
+        # Create a combined list of current tickers + popular tickers for selection
+        # Prioritize current tickers first, then popular ones
+        all_available_tickers = tickers + [t for t in ALL_POPULAR_TICKERS if t not in tickers]
+        
         selected_tickers = st.multiselect(
-            "Select tickers for chart (multiple allowed)",
-            options=tickers,
-            default=tickers[:min(3, len(tickers))] if tickers else []
+            "Choose tickers for chart (search or select multiple)",
+            options=all_available_tickers,
+            default=tickers[:min(3, len(tickers))] if tickers else [],
+            help=f"Search for any ticker symbol. Currently loaded: {len(tickers)} tickers. Popular tickers ({len(ALL_POPULAR_TICKERS)} total) are also available. Select multiple to compare on the same chart."
         )
+        
+        # Allow adding custom tickers directly in chart selection
+        if selected_tickers:
+            st.caption(f"📊 Selected for chart: {', '.join(selected_tickers)}")
+        
+        # Show quick add buttons for popular categories
+        if not selected_tickers:
+            st.info("💡 **Tip:** Select tickers above or use Quick Add buttons to add popular stocks, then select them here for charting.")
         
         if not selected_tickers:
             st.info("Select at least one ticker to display the chart.")
