@@ -19,9 +19,7 @@ if 'last_rate_limit_time' not in st.session_state:
 if 'rate_limit_cooldown' not in st.session_state:
     st.session_state.rate_limit_cooldown = False
 if 'graphs' not in st.session_state:
-    st.session_state.graphs = []
-if 'all_stocks' not in st.session_state:
-    st.session_state.all_stocks = []
+    st.session_state.graphs = [{"stocks": []}]  # Start with one graph by default
 
 
 def check_rate_limit_cooldown() -> bool:
@@ -246,7 +244,7 @@ def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
+def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: Optional[int] = None) -> None:
     """Plot a segmented vertical bar chart with stocks grouped by percentage change ranges."""
     if quotes_df.empty:
         st.warning(f"No data to plot for {title}")
@@ -348,7 +346,7 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
             showarrow=False,
             xref="paper",
             yref="y",
-            font=dict(size=11, color='black'),
+            font=dict(size=9, color='black'),
             bgcolor="rgba(255,255,255,0.9)",
             bordercolor="black",
             borderwidth=1,
@@ -364,7 +362,7 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
             showarrow=False,
             xref="paper",
             yref="y",
-            font=dict(size=11, color='black', weight='bold'),
+            font=dict(size=9, color='black', weight='bold'),
             align="right",
             valign="middle"
         ))
@@ -390,15 +388,23 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
             showarrow=False,
             xref="paper",
             yref="y",
-            font=dict(size=40, color='black'),
+            font=dict(size=30, color='black'),
             align="center",
             valign="middle"
         ))
     
+    # Calculate height: 20% of typical viewport (approximately 150px for 20% of 750px viewport)
+    # Or use provided height parameter
+    if height is None:
+        # Default to 20% of screen - approximately 150-200px
+        chart_height = 180
+    else:
+        chart_height = height
+    
     fig.update_layout(
         title=dict(
             text="Stock Performance - Daily Change (%)",
-            font=dict(size=16, family='Arial'),
+            font=dict(size=12, family='Arial'),
             x=0.5,
             xanchor="center"
         ),
@@ -415,12 +421,12 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
             showgrid=True,
             gridcolor='rgba(128,128,128,0.3)',
             gridwidth=1,
-            tickfont=dict(size=11),
+            tickfont=dict(size=9),
         ),
-        height=max(400, y_bottom * 15 + 100),
+        height=chart_height,
         plot_bgcolor='white',
         paper_bgcolor='white',
-        margin=dict(l=120, r=120, t=80, b=80),
+        margin=dict(l=80, r=80, t=50, b=50),
         showlegend=False,
         annotations=annotations,
         barmode='stack',  # Ensure proper stacking
@@ -453,194 +459,143 @@ def main() -> None:
         "ORCL", "CRM", "ADBE", "INTC", "AMD", "QCOM",
     ]
     
-    # Combine popular stocks with already added stocks
-    all_available_stocks = sorted(list(set(POPULAR_STOCKS + st.session_state.all_stocks)))
+    # Track all stocks that have been used in any graph (for dropdown options)
+    # Use a stable set that persists across reruns to keep options list stable
+    if 'all_used_stocks_set' not in st.session_state:
+        st.session_state.all_used_stocks_set = set()
     
-    # Stock selection with searchable dropdown
-    col1, col2, col3 = st.columns([3, 1.5, 1])
-    
-    with col1:
-        selected_new_stocks = st.multiselect(
-            "Add stocks",
-            options=all_available_stocks,
-            default=[],
-            help="Search and select stocks to add"
-        )
-    
-    with col2:
-        custom_stock = st.text_input(
-            "Custom ticker",
-            value="",
-            placeholder="e.g., CUSTOM",
-            help="Add a custom ticker not in the list"
-        )
-    
-    with col3:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("Add", use_container_width=True):
-            new_stocks = []
-            if selected_new_stocks:
-                new_stocks.extend(selected_new_stocks)
-            if custom_stock:
-                custom = custom_stock.strip().upper()
-                if custom and custom not in new_stocks:
-                    new_stocks.append(custom)
-            
-            if new_stocks:
-                for stock in new_stocks:
-                    if stock not in st.session_state.all_stocks:
-                        st.session_state.all_stocks.append(stock)
-                st.rerun()
-    
-    # Display all stocks
-    if st.session_state.all_stocks:
-        selected_stocks = st.multiselect(
-            "Select stocks to track",
-            options=st.session_state.all_stocks,
-            default=st.session_state.all_stocks,
-        )
-        
-        if selected_stocks:
-            # Check market status (only if not using demo)
-            if not use_demo:
-                is_open, market_msg = check_market_status()
-                if not is_open:
-                    st.info(f"ℹ️ {market_msg} - Showing previous close prices for testing")
-            
-            # Fetch current data
-            if use_demo:
-                quotes = generate_demo_data(selected_stocks)
-                st.info("🧪 **Demo Mode Active** - Using mock data for testing")
-            else:
-                quotes = fetch_current_quotes(selected_stocks)
-            
-            valid_quotes = quotes[~quotes["price"].isna()].copy()
-            
-            # Show fetch status
-            if valid_quotes.empty and not use_demo:
-                failed_tickers = quotes[quotes["price"].isna()]["ticker"].tolist() if not quotes.empty else selected_stocks
-                if failed_tickers:
-                    st.warning(f"⚠️ Failed to fetch data for: {', '.join(failed_tickers)}")
-                    st.info("💡 **Tip:** Enable '🧪 Use Demo Data' in the sidebar to continue developing with mock data!")
-            
-            if not valid_quotes.empty:
-                # Show success message
-                st.success(f"✅ Fetched data for {len(valid_quotes)} stock(s)")
-                
-                # Controls
-                col_add, col_refresh, col_clear = st.columns([1, 1, 1])
-                
-                with col_add:
-                    if st.button("+ Add Graph", use_container_width=True):
-                        if 'graphs' not in st.session_state:
-                            st.session_state.graphs = []
-                        st.session_state.graphs.append({
-                            "stocks": []
-                        })
-                        st.rerun()
-                
-                with col_refresh:
-                    if st.button("🔄 Refresh Data", use_container_width=True):
-                        fetch_current_quotes.clear()
-                        st.rerun()
-                
-                with col_clear:
-                    if st.button("🗑️ Clear Cache", use_container_width=True):
-                        st.cache_data.clear()
-                        st.success("Cache cleared!")
-                        st.rerun()
-                
-                # Initialize graphs if empty
-                if 'graphs' not in st.session_state or not st.session_state.graphs:
-                    st.session_state.graphs = [{"stocks": selected_stocks.copy()}]
-                
-                # Get stocks not yet in any graph
-                stocks_in_graphs = set()
-                for graph in st.session_state.graphs:
-                    stocks_in_graphs.update(graph.get("stocks", []))
-                available_stocks = [s for s in selected_stocks if s not in stocks_in_graphs]
-                
-                # Display each graph
-                for idx, graph in enumerate(st.session_state.graphs):
-                    with st.container():
-                        col_stocks, col_delete = st.columns([4, 1])
-                        
-                        with col_stocks:
-                            graph_stocks = st.multiselect(
-                                f"Graph {idx + 1} - Select stocks",
-                                options=selected_stocks,
-                                default=graph.get("stocks", []),
-                                key=f"graph_stocks_{idx}"
-                            )
-                            graph["stocks"] = graph_stocks
-                        
-                        with col_delete:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if st.button("Delete", key=f"delete_{idx}", use_container_width=True):
-                                st.session_state.graphs.pop(idx)
-                                st.rerun()
-                        
-                        # Plot graph
-                        if graph_stocks:
-                            graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
-                            if not graph_quotes.empty:
-                                plot_vertical_bar(graph_quotes, "pct_change", f"Graph {idx + 1} - Stock Performance")
-                        
-                        st.divider()
-                
-                # Add remaining stocks to new graph option
-                if available_stocks:
-                    if st.button(f"Add Graph for Remaining Stocks ({len(available_stocks)})", use_container_width=True):
-                        st.session_state.graphs.append({
-                            "stocks": available_stocks.copy()
-                        })
-                        st.rerun()
-                
-                # Debug view (collapsed)
-                with st.expander("📊 View Raw Data", expanded=False):
-                    display_quotes = valid_quotes.copy()
-                    display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                    display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-                    display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
-                    st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
-            else:
-                # Show what we tried to fetch
-                st.error(f"❌ No data available for selected stocks: {', '.join(selected_stocks)}")
-                
-                # Show raw quotes for debugging
-                if not quotes.empty:
-                    with st.expander("🔍 Debug: See what was fetched", expanded=True):
-                        st.dataframe(quotes)
-                        st.caption("If you see None/NaN values, the API may be rate-limited. Wait 30-60 seconds and click Refresh.")
-                
-                st.info("💡 **Troubleshooting:**")
-                st.markdown("""
-                - **Rate limiting**: Wait 30-60 seconds between requests, then click Refresh
-                - **Market closed**: Previous close prices should still load (good for testing!)
-                - **Invalid tickers**: Check that ticker symbols are correct (e.g., AAPL, not APPL)
-                - **Try one stock at a time** if rate limiting persists
-                """)
+    # Get current selections from all graphs
+    current_used_stocks = set()
+    for graph_idx, graph in enumerate(st.session_state.graphs):
+        multiselect_key = f"graph_stocks_{graph_idx}"
+        if multiselect_key in st.session_state:
+            current_used_stocks.update(st.session_state[multiselect_key])
         else:
-            st.info("Select stocks to track.")
-    else:
-        st.info("Add stocks to get started.")
+            current_used_stocks.update(graph.get("stocks", []))
     
-    # Remove stocks option
-    if st.session_state.all_stocks:
-        with st.expander("Manage Stocks"):
-            to_remove = st.multiselect(
-                "Remove stocks",
-                options=st.session_state.all_stocks,
-            )
-            if st.button("Remove Selected"):
-                for stock in to_remove:
-                    if stock in st.session_state.all_stocks:
-                        st.session_state.all_stocks.remove(stock)
-                    # Remove from all graphs
-                    for graph in st.session_state.graphs:
-                        if stock in graph["stocks"]:
-                            graph["stocks"].remove(stock)
-                st.rerun()
+    # Update persistent set (union to keep all previously used stocks)
+    # Check if there are new stocks before updating cache
+    new_stocks = current_used_stocks - st.session_state.all_used_stocks_set
+    if new_stocks:
+        st.session_state.all_used_stocks_set.update(new_stocks)
+        # Rebuild cached list only when new stocks are added
+        st.session_state.all_available_stocks_cached = sorted(list(set(POPULAR_STOCKS + list(st.session_state.all_used_stocks_set))))
+    
+    # Initialize cache if it doesn't exist
+    if 'all_available_stocks_cached' not in st.session_state:
+        st.session_state.all_available_stocks_cached = sorted(list(set(POPULAR_STOCKS + list(st.session_state.all_used_stocks_set))))
+    
+    all_available_stocks = st.session_state.all_available_stocks_cached
+    
+    # Controls section - always visible
+    col_add, col_refresh, col_clear = st.columns([1, 1, 1])
+    
+    with col_add:
+        if st.button("+ Add Graph", use_container_width=True):
+            st.session_state.graphs.append({
+                "stocks": []
+            })
+            st.rerun()
+    
+    with col_refresh:
+        if st.button("🔄 Refresh Data", use_container_width=True):
+            fetch_current_quotes.clear()
+            st.rerun()
+    
+    with col_clear:
+        if st.button("🗑️ Clear Cache", use_container_width=True):
+            st.cache_data.clear()
+            st.success("Cache cleared!")
+            st.rerun()
+    
+    # Get all stocks that are in any graph (from session state for accuracy)
+    all_stocks_in_graphs = set()
+    for graph_idx, graph in enumerate(st.session_state.graphs):
+        multiselect_key = f"graph_stocks_{graph_idx}"
+        if multiselect_key in st.session_state:
+            all_stocks_in_graphs.update(st.session_state[multiselect_key])
+        else:
+            all_stocks_in_graphs.update(graph.get("stocks", []))
+    
+    # Initialize valid_quotes as empty DataFrame
+    valid_quotes = pd.DataFrame()
+    
+    # Fetch data only for stocks that are in graphs
+    if all_stocks_in_graphs:
+        stocks_to_fetch = sorted(list(all_stocks_in_graphs))
+        
+        # Fetch current data
+        if use_demo:
+            quotes = generate_demo_data(stocks_to_fetch)
+        else:
+            quotes = fetch_current_quotes(stocks_to_fetch)
+        
+        valid_quotes = quotes[~quotes["price"].isna()].copy()
+    
+    # Display graphs in a grid layout (2 columns for better viewport usage)
+    if st.session_state.graphs:
+        num_graphs = len(st.session_state.graphs)
+        graphs_per_row = 2
+        num_rows = (num_graphs + graphs_per_row - 1) // graphs_per_row
+        
+        # Display each graph in grid
+        for row in range(num_rows):
+            cols = st.columns(graphs_per_row)
+            for col_idx in range(graphs_per_row):
+                graph_idx = row * graphs_per_row + col_idx
+                if graph_idx < num_graphs:
+                    graph = st.session_state.graphs[graph_idx]
+                    with cols[col_idx]:
+                        with st.container():
+                            # Graph header with stock selection and delete button
+                            col_stocks, col_delete = st.columns([3, 1])
+                            
+                            with col_stocks:
+                                multiselect_key = f"graph_stocks_{graph_idx}"
+                                
+                                # Initialize session state for this multiselect if it doesn't exist
+                                if multiselect_key not in st.session_state:
+                                    st.session_state[multiselect_key] = graph.get("stocks", [])
+                                
+                                # Get the current value from session state (this is the source of truth)
+                                current_selection = st.session_state[multiselect_key]
+                                
+                                graph_stocks = st.multiselect(
+                                    f"Graph {graph_idx + 1} - Select stocks",
+                                    options=all_available_stocks,
+                                    default=current_selection,
+                                    key=multiselect_key
+                                )
+                                
+                                # Update graph state to match session state (multiselect updates session state automatically)
+                                graph["stocks"] = st.session_state[multiselect_key]
+                            
+                            with col_delete:
+                                st.markdown("<br>", unsafe_allow_html=True)
+                                if st.button("Delete", key=f"delete_{graph_idx}", use_container_width=True):
+                                    # Clean up session state for this graph
+                                    multiselect_key = f"graph_stocks_{graph_idx}"
+                                    if multiselect_key in st.session_state:
+                                        del st.session_state[multiselect_key]
+                                    st.session_state.graphs.pop(graph_idx)
+                                    st.rerun()
+                            
+                            # Plot graph
+                            if graph_stocks and not valid_quotes.empty:
+                                graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
+                                if not graph_quotes.empty:
+                                    plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
+                            
+                            st.divider()
+        
+        # Debug view (collapsed)
+        if all_stocks_in_graphs and not valid_quotes.empty:
+            with st.expander("📊 View Raw Data", expanded=False):
+                display_quotes = valid_quotes.copy()
+                display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+                display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
+                st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
 
 
 if __name__ == "__main__":
