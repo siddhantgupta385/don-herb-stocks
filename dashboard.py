@@ -247,82 +247,183 @@ def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
 
 
 def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str) -> None:
-    """Plot a vertical bar chart for a specific metric."""
+    """Plot a segmented vertical bar chart with stocks grouped by percentage change ranges."""
     if quotes_df.empty:
         st.warning(f"No data to plot for {title}")
         return
     
-    if quotes_df[metric].isna().all():
-        st.warning(f"No {metric} data available for selected stocks")
+    # Always use percentage change for the main visualization
+    if "pct_change" not in quotes_df.columns or quotes_df["pct_change"].isna().all():
+        st.warning("No percentage change data available for selected stocks")
         return
     
-    valid_data = quotes_df[~quotes_df[metric].isna()].copy()
+    valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
-        st.warning(f"No valid {metric} data after filtering")
+        st.warning("No valid percentage change data after filtering")
         return
     
-    valid_data = valid_data.sort_values(metric, ascending=True)
+    # Define percentage change ranges (slabs)
+    ranges = [
+        (float('-inf'), -5, "-5%+", '#8B0000'),      # Dark red
+        (-5, -2, "-2% to -5%", '#DC143C'),           # Crimson
+        (-2, 0, "0% to -2%", '#FF6347'),            # Tomato
+        (0, 1, "+0% to +1%", '#FFD700'),            # Gold
+        (1, 2, "+1% to +2%", '#FFA500'),            # Orange
+        (2, 5, "+2% to +5%", '#32CD32'),            # Lime green
+        (5, float('inf'), "+5%+", '#00FF00'),        # Bright green
+    ]
     
+    # Group stocks by percentage change ranges
+    range_groups = {range_label: [] for _, _, range_label, _ in ranges}
+    
+    for _, row in valid_data.iterrows():
+        pct = row["pct_change"]
+        ticker = row["ticker"]
+        price = row["price"]
+        
+        # Find which range this stock belongs to
+        for min_pct, max_pct, range_label, _ in ranges:
+            if min_pct == float('-inf'):
+                if pct < max_pct:
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    break
+            elif max_pct == float('inf'):
+                if pct >= min_pct:
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    break
+            else:
+                if min_pct <= pct < max_pct:
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    break
+    
+    # Create stacked vertical bar - all in same line
     fig = go.Figure()
     
-    colors = []
-    for pct in valid_data[metric]:
-        if metric == "pct_change":
-            if pct < 0:
-                colors.append('#dc2626')
-            elif pct < 2:
-                colors.append('#fbbf24')
-            else:
-                colors.append('#10b981')
-        else:
-            colors.append('#3b82f6')
+    y_bottom = 0
+    annotations = []
     
-    # Format text labels based on metric
-    if metric == "pct_change":
-        text_labels = [f"{val:.2f}%" for val in valid_data[metric]]
-    elif metric == "volume":
-        text_labels = [f"{val/1e6:.1f}M" if val >= 1e6 else f"{val/1e3:.1f}K" if val >= 1e3 else f"{val:.0f}" for val in valid_data[metric]]
-    else:
-        text_labels = [f"${val:.2f}" for val in valid_data[metric]]
+    # Build stacked segments from bottom to top - all at x=0 (same vertical line)
+    for min_pct, max_pct, range_label, color in ranges:
+        stocks_in_range = range_groups[range_label]
+        if not stocks_in_range:
+            continue
+        
+        # Calculate segment height (based on number of stocks, with min height)
+        segment_height = max(5, len(stocks_in_range) * 2)  # At least 5 units, 2 per stock
+        y_top = y_bottom + segment_height
+        y_mid = (y_bottom + y_top) / 2
+        
+        # Create the segment - all at x=0 to keep in same vertical line
+        fig.add_trace(go.Bar(
+            x=[0],  # All segments at x=0 (same vertical line)
+            y=[segment_height],
+            base=[y_bottom],
+            name=range_label,
+            marker=dict(
+                color=color,
+                line=dict(color='black', width=2)
+            ),
+            hovertemplate=f"<b>{range_label}</b><br>" +
+                         "<br>".join([f"{s['ticker']}: {s['pct_change']:.2f}% (${s['price']:.2f})" 
+                                     for s in stocks_in_range]) +
+                         "<extra></extra>",
+            orientation='v',
+            showlegend=False,
+            width=0.25  # Narrower bar width
+        ))
+        
+        # Add stock labels
+        stock_labels = ", ".join([s['ticker'] for s in stocks_in_range])
+        if len(stock_labels) > 30:
+            # Split into multiple lines if too long
+            tickers = [s['ticker'] for s in stocks_in_range]
+            mid = len(tickers) // 2
+            stock_labels = ", ".join(tickers[:mid]) + "<br>" + ", ".join(tickers[mid:])
+        
+        # Add annotations for stock names and range label
+        annotations.append(dict(
+            x=0.15,
+            y=y_mid,
+            text=stock_labels,
+            showarrow=False,
+            xref="paper",
+            yref="y",
+            font=dict(size=11, color='black'),
+            bgcolor="rgba(255,255,255,0.9)",
+            bordercolor="black",
+            borderwidth=1,
+            borderpad=4,
+            align="left",
+            valign="middle"
+        ))
+        
+        annotations.append(dict(
+            x=0.85,
+            y=y_mid,
+            text=range_label,
+            showarrow=False,
+            xref="paper",
+            yref="y",
+            font=dict(size=11, color='black', weight='bold'),
+            align="right",
+            valign="middle"
+        ))
+        
+        # Add horizontal line at segment boundary
+        if y_bottom > 0:
+            fig.add_shape(
+                type="line",
+                x0=0.0, y0=y_bottom, x1=1.0, y1=y_bottom,
+                line=dict(color="black", width=1.5, dash="dash"),
+                xref="paper",
+                yref="y"
+            )
+        
+        y_bottom = y_top
     
-    fig.add_trace(go.Bar(
-        x=valid_data["ticker"],
-        y=valid_data[metric],
-        marker_color=colors,
-        marker_line_color='black',
-        marker_line_width=1.5,
-        text=text_labels,
-        textposition='outside',
-        textfont=dict(size=11, color='black'),
-    ))
-    
-    yaxis_title = {
-        "price": "Price ($)",
-        "pct_change": "Change (%)",
-        "volume": "Volume"
-    }.get(metric, metric)
+    # Add upward arrow
+    if y_bottom > 0:
+        annotations.append(dict(
+            x=0.5,
+            y=y_bottom + 2,
+            text="↑",
+            showarrow=False,
+            xref="paper",
+            yref="y",
+            font=dict(size=40, color='black'),
+            align="center",
+            valign="middle"
+        ))
     
     fig.update_layout(
         title=dict(
-            text=title,
-            font=dict(size=16),
+            text="Stock Performance - Daily Change (%)",
+            font=dict(size=16, family='Arial'),
             x=0.5,
             xanchor="center"
         ),
         xaxis=dict(
             title="",
+            showticklabels=False,
+            range=[-0.2, 0.2],  # Narrow range to keep bar centered
             showgrid=False,
+            zeroline=False,
+            fixedrange=True
         ),
         yaxis=dict(
-            title=yaxis_title,
+            title="Percentage Change (%)",
             showgrid=True,
-            gridcolor='rgba(128,128,128,0.2)',
+            gridcolor='rgba(128,128,128,0.3)',
+            gridwidth=1,
+            tickfont=dict(size=11),
         ),
-        height=500,
+        height=max(400, y_bottom * 15 + 100),
         plot_bgcolor='white',
         paper_bgcolor='white',
-        margin=dict(l=60, r=60, t=60, b=60),
+        margin=dict(l=120, r=120, t=80, b=80),
         showlegend=False,
+        annotations=annotations,
+        barmode='stack',  # Ensure proper stacking
     )
     
     st.plotly_chart(fig, use_container_width=True)
@@ -426,28 +527,20 @@ def main() -> None:
                 # Show success message
                 st.success(f"✅ Fetched data for {len(valid_quotes)} stock(s)")
                 
-                # Debug view (collapsed)
-                with st.expander("📊 View Raw Data", expanded=False):
-                    display_quotes = valid_quotes.copy()
-                    display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                    display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-                    display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
-                    st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
-                
-                # Graph management
+                # Controls
                 col_add, col_refresh, col_clear = st.columns([1, 1, 1])
                 
                 with col_add:
                     if st.button("+ Add Graph", use_container_width=True):
+                        if 'graphs' not in st.session_state:
+                            st.session_state.graphs = []
                         st.session_state.graphs.append({
-                            "stocks": [],
-                            "metric": "price"
+                            "stocks": []
                         })
                         st.rerun()
                 
                 with col_refresh:
                     if st.button("🔄 Refresh Data", use_container_width=True):
-                        # Clear cache and rerun
                         fetch_current_quotes.clear()
                         st.rerun()
                 
@@ -457,39 +550,27 @@ def main() -> None:
                         st.success("Cache cleared!")
                         st.rerun()
                 
-                # Display graphs - create first graph if none exist
-                if not st.session_state.graphs:
-                    st.session_state.graphs.append({
-                        "stocks": selected_stocks.copy(),
-                        "metric": "price"
-                    })
+                # Initialize graphs if empty
+                if 'graphs' not in st.session_state or not st.session_state.graphs:
+                    st.session_state.graphs = [{"stocks": selected_stocks.copy()}]
                 
                 # Get stocks not yet in any graph
                 stocks_in_graphs = set()
                 for graph in st.session_state.graphs:
-                    stocks_in_graphs.update(graph["stocks"])
+                    stocks_in_graphs.update(graph.get("stocks", []))
                 available_stocks = [s for s in selected_stocks if s not in stocks_in_graphs]
                 
                 # Display each graph
                 for idx, graph in enumerate(st.session_state.graphs):
                     with st.container():
-                        col_metric, col_stocks, col_delete = st.columns([2, 3, 1])
-                        
-                        with col_metric:
-                            metric = st.selectbox(
-                                "Metric",
-                                options=["price", "pct_change", "volume"],
-                                index=["price", "pct_change", "volume"].index(graph["metric"]),
-                                key=f"metric_{idx}"
-                            )
-                            graph["metric"] = metric
+                        col_stocks, col_delete = st.columns([4, 1])
                         
                         with col_stocks:
                             graph_stocks = st.multiselect(
-                                "Stocks",
+                                f"Graph {idx + 1} - Select stocks",
                                 options=selected_stocks,
-                                default=graph["stocks"],
-                                key=f"stocks_{idx}"
+                                default=graph.get("stocks", []),
+                                key=f"graph_stocks_{idx}"
                             )
                             graph["stocks"] = graph_stocks
                         
@@ -503,12 +584,7 @@ def main() -> None:
                         if graph_stocks:
                             graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
                             if not graph_quotes.empty:
-                                metric_title = {
-                                    "price": "Current Price",
-                                    "pct_change": "Daily Change (%)",
-                                    "volume": "Volume"
-                                }.get(metric, metric)
-                                plot_vertical_bar(graph_quotes, metric, metric_title)
+                                plot_vertical_bar(graph_quotes, "pct_change", f"Graph {idx + 1} - Stock Performance")
                         
                         st.divider()
                 
@@ -516,10 +592,17 @@ def main() -> None:
                 if available_stocks:
                     if st.button(f"Add Graph for Remaining Stocks ({len(available_stocks)})", use_container_width=True):
                         st.session_state.graphs.append({
-                            "stocks": available_stocks.copy(),
-                            "metric": "price"
+                            "stocks": available_stocks.copy()
                         })
                         st.rerun()
+                
+                # Debug view (collapsed)
+                with st.expander("📊 View Raw Data", expanded=False):
+                    display_quotes = valid_quotes.copy()
+                    display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+                    display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+                    display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
+                    st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
             else:
                 # Show what we tried to fetch
                 st.error(f"❌ No data available for selected stocks: {', '.join(selected_stocks)}")
