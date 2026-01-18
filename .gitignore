@@ -10,7 +10,8 @@ ENV/
 .venv
 
 # Streamlit
-.streamlit/
+.streamlit/secrets.toml
+.streamlit/credentials.json
 
 # IDE
 .vscode/

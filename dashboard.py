@@ -674,40 +674,23 @@ def main() -> None:
     
     all_available_stocks = st.session_state.all_available_stocks_cached
     
-    # Status bar - use empty containers to prevent flickering
-    if 'status_containers' not in st.session_state:
-        st.session_state.status_containers = {
-            'status_col1': st.empty(),
-            'status_col2': st.empty(),
-            'status_col3': st.empty()
-        }
-    
+    # Status bar - only update when data actually changes to prevent flickering
     status_col1, status_col2, status_col3 = st.columns([2, 2, 1])
     with status_col1:
-        status_placeholder1 = st.empty()
-    with status_col2:
-        status_placeholder2 = st.empty()
-    with status_col3:
-        status_placeholder3 = st.empty()
-    
-    # Update status bar only when data actually changes, not on every rerun
-    if 'last_status_update' not in st.session_state or st.session_state.last_status_update != st.session_state.last_update_time:
         if st.session_state.last_update_time:
-            time_ago = (datetime.now() - st.session_state.last_update_time).total_seconds()
-            if time_ago < 60:
-                status_placeholder1.caption(f"🟢 Last update: {int(time_ago)}s ago")
-            else:
-                status_placeholder1.caption(f"🟡 Last update: {int(time_ago/60)}m ago")
+            update_time_str = st.session_state.last_update_time.strftime("%H:%M:%S")
+            st.caption(f"🟢 Last update: {update_time_str}")
         else:
-            status_placeholder1.caption("⚪ Waiting for first update...")
-        
+            st.caption("⚪ Waiting for first update...")
+    
+    with status_col2:
         if st.session_state.auto_refresh_enabled:
-            status_placeholder2.caption(f"🔄 Auto-refresh: Every {st.session_state.refresh_interval}s")
+            st.caption(f"🔄 Auto-refresh: Every {st.session_state.refresh_interval}s")
         else:
-            status_placeholder2.caption("⏸️ Auto-refresh: Disabled")
-        
-        status_placeholder3.caption(f"📊 Updates: {st.session_state.update_count}")
-        st.session_state.last_status_update = st.session_state.last_update_time
+            st.caption("⏸️ Auto-refresh: Disabled")
+    
+    with status_col3:
+        st.caption(f"📊 Updates: {st.session_state.update_count}")
     
     # Controls section - always visible
     col_add, col_refresh, col_clear = st.columns([1, 1, 1])
