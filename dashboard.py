@@ -3,6 +3,8 @@ import time
 from typing import Dict, List, Optional
 from datetime import datetime
 import os
+import signal
+from contextlib import contextmanager
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,6 +14,26 @@ from yfinance.exceptions import YFRateLimitError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def timeout_handler(seconds=10):
+    """Context manager to handle timeouts for API calls."""
+    def timeout_signal_handler(signum, frame):
+        raise TimeoutError(f"Operation timed out after {seconds} seconds")
+    
+    # Set up signal handler for timeout (Unix only)
+    if hasattr(signal, 'SIGALRM'):
+        old_handler = signal.signal(signal.SIGALRM, timeout_signal_handler)
+        signal.alarm(seconds)
+        try:
+            yield
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, old_handler)
+    else:
+        # Windows doesn't support SIGALRM, just yield without timeout
+        yield
 
 # Try to import streamlit-autorefresh, fallback if not available
 try:
@@ -94,29 +116,57 @@ def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
         volume = None
         currency = "USD"
         
+        logger.info(f"Fetching data for {t}...")
+        
         try:
             # Method 1: Try info dict first (most reliable, works when market closed)
             try:
-                info = ticker.info
-                # Get current/regular market price
-                last_price = (
-                    info.get('currentPrice') or 
-                    info.get('regularMarketPrice') or 
-                    info.get('previousClose')  # Use previous close if market closed
-                )
-                prev_close = (
-                    info.get('previousClose') or 
-                    info.get('regularMarketPreviousClose')
-                )
-                volume = info.get('volume') or info.get('regularMarketVolume') or info.get('regularMarketVolume')
-                currency = info.get('currency', 'USD')
+                # Add timeout protection - use a simple try/except with manual timeout
+                import threading
+                info_result = [None]
+                info_error = [None]
                 
-                # If market is closed and we don't have current price, use previous close
-                if (last_price is None or pd.isna(last_price)) and prev_close is not None:
-                    last_price = prev_close
+                def fetch_info():
+                    try:
+                        info_result[0] = ticker.info
+                    except Exception as e:
+                        info_error[0] = e
+                
+                info_thread = threading.Thread(target=fetch_info, daemon=True)
+                info_thread.start()
+                info_thread.join(timeout=5)  # 5 second timeout
+                
+                if info_thread.is_alive():
+                    logger.warning(f"Info fetch timed out for {t}")
+                    info = None
+                elif info_error[0]:
+                    raise info_error[0]
+                else:
+                    info = info_result[0]
+                
+                if info:
+                    # Get current/regular market price
+                    last_price = (
+                        info.get('currentPrice') or 
+                        info.get('regularMarketPrice') or 
+                        info.get('previousClose')  # Use previous close if market closed
+                    )
+                    prev_close = (
+                        info.get('previousClose') or 
+                        info.get('regularMarketPreviousClose')
+                    )
+                    volume = info.get('volume') or info.get('regularMarketVolume') or info.get('regularMarketVolume')
+                    currency = info.get('currency', 'USD')
+                    
+                    # If market is closed and we don't have current price, use previous close
+                    if (last_price is None or pd.isna(last_price)) and prev_close is not None:
+                        last_price = prev_close
+                    logger.info(f"Successfully fetched info for {t}: price={last_price}, prev_close={prev_close}")
+                else:
+                    logger.warning(f"Info fetch returned None for {t}")
                     
             except Exception as e:
-                logger.debug(f"Info method failed for {t}: {e}")
+                logger.warning(f"Info method failed for {t}: {e}")
             
             # Method 2: Try fast_info if info didn't work
             if last_price is None or pd.isna(last_price):
@@ -794,11 +844,14 @@ def main() -> None:
         
         if stocks_to_fetch and needs_fetch:
             try:
+                logger.info(f"Starting data fetch for stocks: {stocks_to_fetch}")
                 # Fetch current data (this happens in background, UI remains responsive)
                 if use_demo:
                     quotes = generate_demo_data(stocks_to_fetch)
+                    logger.info("Using demo data")
                 else:
                     quotes = fetch_current_quotes(stocks_to_fetch)
+                    logger.info(f"Fetched {len(quotes)} quotes, {len(quotes[~quotes['price'].isna()])} with valid prices")
                 
                 # Update cached quotes
                 st.session_state.cached_quotes = quotes.copy()
@@ -921,7 +974,12 @@ def main() -> None:
                             with graph_container:
                                 if graph_stocks:
                                     if valid_quotes.empty:
-                                        st.info(f"⏳ Loading data for {', '.join(graph_stocks)}...")
+                                        # Check if we're currently fetching
+                                        if 'needs_fetch' in locals() and needs_fetch and all_stocks_in_graphs:
+                                            st.info(f"⏳ Fetching data for {', '.join(graph_stocks)}... This may take 10-30 seconds.")
+                                            st.caption("💡 Tip: If this takes too long, try enabling 'Use Demo Data' in the sidebar for testing.")
+                                        else:
+                                            st.warning(f"⚠️ No data available. Click 'Refresh Data' to fetch.")
                                     else:
                                         graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
                                         if graph_quotes.empty:
