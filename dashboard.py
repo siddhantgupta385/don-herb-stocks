@@ -405,10 +405,14 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: 
         st.warning("No percentage change data available for selected stocks")
         return
     
+    # Filter out rows with None or NaN values in pct_change
     valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
         st.warning("No valid percentage change data after filtering")
         return
+    
+    # Ensure price values are not None (replace None with NaN for consistency)
+    valid_data["price"] = valid_data["price"].fillna(pd.NA)
     
     # Define percentage change ranges (slabs)
     ranges = [
@@ -429,19 +433,26 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: 
         ticker = row["ticker"]
         price = row["price"]
         
+        # Skip if pct_change is None or NaN (shouldn't happen after filtering, but safety check)
+        if pd.isna(pct):
+            continue
+        
+        # Ensure price is a valid number or None
+        price_val = price if pd.notna(price) else None
+        
         # Find which range this stock belongs to
         for min_pct, max_pct, range_label, _ in ranges:
             if min_pct == float('-inf'):
                 if pct < max_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
                     break
             elif max_pct == float('inf'):
                 if pct >= min_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
                     break
             else:
                 if min_pct <= pct < max_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": pct, "price": price})
+                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
                     break
     
     # Create stacked vertical bar - all in same line
@@ -472,8 +483,14 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: 
                 line=dict(color='black', width=2)
             ),
             hovertemplate=f"<b>{range_label}</b><br>" +
-                         "<br>".join([f"{s['ticker']}: {s['pct_change']:.2f}% (${s['price']:.2f})" 
-                                     for s in stocks_in_range]) +
+                         "<br>".join([
+                             f"{s['ticker']}: " + 
+                             (f"{s['pct_change']:.2f}%" if s['pct_change'] is not None and pd.notna(s['pct_change']) else "N/A") +
+                             " (" +
+                             (f"${s['price']:.2f}" if s['price'] is not None and pd.notna(s['price']) else "N/A") +
+                             ")"
+                             for s in stocks_in_range
+                         ]) +
                          "<extra></extra>",
             orientation='v',
             showlegend=False,
