@@ -10,6 +10,9 @@ import streamlit as st
 import yfinance as yf
 from yfinance.exceptions import YFRateLimitError
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Try to import streamlit-autorefresh, fallback if not available
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -17,9 +20,6 @@ try:
 except ImportError:
     AUTOREFRESH_AVAILABLE = False
     logger.warning("streamlit-autorefresh not installed. Install with: pip install streamlit-autorefresh")
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 # Global rate limiting state
 if 'last_rate_limit_time' not in st.session_state:
@@ -70,7 +70,7 @@ def check_market_status() -> tuple:
     return True, "Market is open"
 
 
-@st.cache_data(ttl=10)  # Reduced cache to 10 seconds for near real-time updates
+@st.cache_data(ttl=10, show_spinner=False)  # Reduced cache to 10 seconds for near real-time updates
 def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
     """Fetch current quote data (price, % change, volume) for a list of tickers.
     Works even when market is closed by using previous close data."""
@@ -674,26 +674,40 @@ def main() -> None:
     
     all_available_stocks = st.session_state.all_available_stocks_cached
     
-    # Status bar - show real-time update info
+    # Status bar - use empty containers to prevent flickering
+    if 'status_containers' not in st.session_state:
+        st.session_state.status_containers = {
+            'status_col1': st.empty(),
+            'status_col2': st.empty(),
+            'status_col3': st.empty()
+        }
+    
     status_col1, status_col2, status_col3 = st.columns([2, 2, 1])
     with status_col1:
+        status_placeholder1 = st.empty()
+    with status_col2:
+        status_placeholder2 = st.empty()
+    with status_col3:
+        status_placeholder3 = st.empty()
+    
+    # Update status bar only when data actually changes, not on every rerun
+    if 'last_status_update' not in st.session_state or st.session_state.last_status_update != st.session_state.last_update_time:
         if st.session_state.last_update_time:
             time_ago = (datetime.now() - st.session_state.last_update_time).total_seconds()
             if time_ago < 60:
-                st.caption(f"🟢 Last update: {int(time_ago)}s ago")
+                status_placeholder1.caption(f"🟢 Last update: {int(time_ago)}s ago")
             else:
-                st.caption(f"🟡 Last update: {int(time_ago/60)}m ago")
+                status_placeholder1.caption(f"🟡 Last update: {int(time_ago/60)}m ago")
         else:
-            st.caption("⚪ Waiting for first update...")
-    
-    with status_col2:
+            status_placeholder1.caption("⚪ Waiting for first update...")
+        
         if st.session_state.auto_refresh_enabled:
-            st.caption(f"🔄 Auto-refresh: Every {st.session_state.refresh_interval}s")
+            status_placeholder2.caption(f"🔄 Auto-refresh: Every {st.session_state.refresh_interval}s")
         else:
-            st.caption("⏸️ Auto-refresh: Disabled")
-    
-    with status_col3:
-        st.caption(f"📊 Updates: {st.session_state.update_count}")
+            status_placeholder2.caption("⏸️ Auto-refresh: Disabled")
+        
+        status_placeholder3.caption(f"📊 Updates: {st.session_state.update_count}")
+        st.session_state.last_status_update = st.session_state.last_update_time
     
     # Controls section - always visible
     col_add, col_refresh, col_clear = st.columns([1, 1, 1])
@@ -739,6 +753,10 @@ def main() -> None:
     if 'cached_quotes' not in st.session_state:
         st.session_state.cached_quotes = pd.DataFrame()
     
+    # Track last fetched stocks to prevent unnecessary refetches
+    if 'last_fetched_stocks' not in st.session_state:
+        st.session_state.last_fetched_stocks = set()
+    
     # Fetch data only for stocks that are in graphs
     if all_stocks_in_graphs:
         stocks_to_fetch = sorted(list(all_stocks_in_graphs))
@@ -757,13 +775,15 @@ def main() -> None:
         else:
             valid_quotes = pd.DataFrame()
         
-        # Fetch data in background (non-blocking)
-        if stocks_to_fetch:
-            # Show loading status without blocking UI
-            loading_placeholder = st.empty()
-            if new_stocks:
-                loading_placeholder.info(f"🔄 Loading {len(new_stocks)} new stock(s) in background...")
-            
+        # Fetch data in background (non-blocking) - only if stocks changed or cache expired
+        stocks_set = set(stocks_to_fetch)
+        should_fetch = (stocks_set != st.session_state.last_fetched_stocks or 
+                       st.session_state.cached_quotes.empty or
+                       (st.session_state.auto_refresh_enabled and 
+                        st.session_state.last_update_time and
+                        (datetime.now() - st.session_state.last_update_time).total_seconds() >= st.session_state.refresh_interval))
+        
+        if stocks_to_fetch and should_fetch:
             try:
                 # Fetch current data (this happens in background, UI remains responsive)
                 if use_demo:
@@ -773,6 +793,7 @@ def main() -> None:
                 
                 # Update cached quotes
                 st.session_state.cached_quotes = quotes.copy()
+                st.session_state.last_fetched_stocks = stocks_set
                 
                 # Update timestamp and count
                 st.session_state.last_update_time = datetime.now()
@@ -781,17 +802,19 @@ def main() -> None:
                 # Get valid quotes
                 valid_quotes = quotes[~quotes["price"].isna()].copy()
                 
-                # Clear loading indicator
-                loading_placeholder.empty()
                 st.session_state.loading_stocks = set()
             except Exception as e:
                 logger.error(f"Error fetching data: {e}")
-                loading_placeholder.warning(f"⚠️ Error loading some stocks. Showing cached data if available.")
                 # Keep existing cached data if available
                 if valid_quotes.empty and not st.session_state.cached_quotes.empty:
                     valid_quotes = st.session_state.cached_quotes[
                         st.session_state.cached_quotes['ticker'].isin(stocks_to_fetch)
                     ].copy()
+        elif not st.session_state.cached_quotes.empty:
+            # Use cached data if available and no fetch needed
+            valid_quotes = st.session_state.cached_quotes[
+                st.session_state.cached_quotes['ticker'].isin(stocks_to_fetch)
+            ].copy()
     else:
         valid_quotes = pd.DataFrame()
     
@@ -878,15 +901,13 @@ def main() -> None:
                                     st.session_state.graphs.pop(graph_idx)
                                     st.rerun()
                             
-                            # Plot graph
-                            if graph_stocks and not valid_quotes.empty:
-                                graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
-                                if not graph_quotes.empty:
-                                    # Show update timestamp for this graph
-                                    if st.session_state.last_update_time:
-                                        update_time_str = st.session_state.last_update_time.strftime("%H:%M:%S")
-                                        st.caption(f"🕐 Updated: {update_time_str}")
-                                    plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
+                            # Plot graph - use container to prevent flickering
+                            graph_container = st.container()
+                            with graph_container:
+                                if graph_stocks and not valid_quotes.empty:
+                                    graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
+                                    if not graph_quotes.empty:
+                                        plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
                             
                             st.divider()
         
@@ -910,13 +931,15 @@ def main() -> None:
             )
             
             # Background refresh - clear cache and update in background (non-blocking)
-            # This happens automatically on rerun, so we just clear cache
-            fetch_current_quotes.clear()
-            # Keep cached quotes visible while refreshing in background
-            # Data will update automatically on next rerun
+            # Only clear cache if we haven't just refreshed (prevent unnecessary reruns)
+            if 'last_autorefresh_time' not in st.session_state:
+                st.session_state.last_autorefresh_time = None
             
-            # Show refresh status (non-blocking)
-            st.sidebar.caption(f"🔄 Auto-refreshing in background... (Count: {refresh_count})")
+            current_time = datetime.now()
+            if (st.session_state.last_autorefresh_time is None or 
+                (current_time - st.session_state.last_autorefresh_time).total_seconds() >= st.session_state.refresh_interval):
+                fetch_current_quotes.clear()
+                st.session_state.last_autorefresh_time = current_time
         else:
             # Fallback: manual refresh reminder
             st.sidebar.warning("⚠️ Auto-refresh requires: `pip install streamlit-autorefresh`")
