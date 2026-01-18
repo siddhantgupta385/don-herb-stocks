@@ -760,13 +760,22 @@ def main() -> None:
         
         # Fetch data in background (non-blocking) - only if stocks changed or cache expired
         stocks_set = set(stocks_to_fetch)
-        should_fetch = (stocks_set != st.session_state.last_fetched_stocks or 
-                       st.session_state.cached_quotes.empty or
-                       (st.session_state.auto_refresh_enabled and 
-                        st.session_state.last_update_time and
-                        (datetime.now() - st.session_state.last_update_time).total_seconds() >= st.session_state.refresh_interval))
         
-        if stocks_to_fetch and should_fetch:
+        # Determine if we need to fetch data
+        needs_fetch = False
+        if st.session_state.cached_quotes.empty:
+            # Always fetch if no cached data
+            needs_fetch = True
+        elif stocks_set != st.session_state.last_fetched_stocks:
+            # Fetch if stocks changed
+            needs_fetch = True
+        elif (st.session_state.auto_refresh_enabled and 
+              st.session_state.last_update_time and
+              (datetime.now() - st.session_state.last_update_time).total_seconds() >= st.session_state.refresh_interval):
+            # Fetch if auto-refresh interval passed
+            needs_fetch = True
+        
+        if stocks_to_fetch and needs_fetch:
             try:
                 # Fetch current data (this happens in background, UI remains responsive)
                 if use_demo:
@@ -787,7 +796,10 @@ def main() -> None:
                 
                 st.session_state.loading_stocks = set()
             except Exception as e:
-                logger.error(f"Error fetching data: {e}")
+                error_msg = f"Error fetching data: {str(e)}"
+                logger.error(error_msg)
+                # Show error to user
+                st.error(f"⚠️ {error_msg}")
                 # Keep existing cached data if available
                 if valid_quotes.empty and not st.session_state.cached_quotes.empty:
                     valid_quotes = st.session_state.cached_quotes[
@@ -798,6 +810,9 @@ def main() -> None:
             valid_quotes = st.session_state.cached_quotes[
                 st.session_state.cached_quotes['ticker'].isin(stocks_to_fetch)
             ].copy()
+        else:
+            # No data available
+            valid_quotes = pd.DataFrame()
     else:
         valid_quotes = pd.DataFrame()
     
@@ -887,10 +902,17 @@ def main() -> None:
                             # Plot graph - use container to prevent flickering
                             graph_container = st.container()
                             with graph_container:
-                                if graph_stocks and not valid_quotes.empty:
-                                    graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
-                                    if not graph_quotes.empty:
-                                        plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
+                                if graph_stocks:
+                                    if valid_quotes.empty:
+                                        st.info(f"⏳ Loading data for {', '.join(graph_stocks)}...")
+                                    else:
+                                        graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
+                                        if graph_quotes.empty:
+                                            st.warning(f"⚠️ No data available for selected stocks: {', '.join(graph_stocks)}")
+                                        else:
+                                            plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
+                                else:
+                                    st.info("👆 Select stocks above to display graph")
                             
                             st.divider()
         
