@@ -1,3 +1,0 @@
-# This file is for Streamlit Cloud deployment
-# If you need system-level packages, list them here
-# Example: libgomp1
