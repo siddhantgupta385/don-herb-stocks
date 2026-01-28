@@ -9,8 +9,22 @@ from contextlib import contextmanager
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-import yfinance as yf
-from yfinance.exceptions import YFRateLimitError
+import requests
+
+# Alpha Vantage API Configuration
+ALPHA_VANTAGE_API_KEY = "INN8K9M8D1426XX4"
+ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
+
+# Rate Limit Configuration
+# Free tier: 5 requests/minute, 25 requests/day
+# Premium tiers: 75, 150, 300, 600, or 1200 requests/minute (no daily limit)
+# Set this based on your subscription tier
+ALPHA_VANTAGE_REQUESTS_PER_MINUTE = 5  # Change this when you upgrade:
+# - 75 requests/min: $49.99/month
+# - 150 requests/min: $99.99/month  
+# - 300 requests/min: $149.99/month
+# - 600 requests/min: $199.99/month
+# - 1200 requests/min: $249.99/month
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -94,8 +108,9 @@ def check_market_status() -> tuple:
 
 @st.cache_data(ttl=10, show_spinner=False)  # Reduced cache to 10 seconds for near real-time updates
 def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
-    """Fetch current quote data (price, % change, volume) for a list of tickers.
-    Works even when market is closed by using previous close data."""
+    """Fetch current quote data (price, % change, volume) for a list of tickers using Alpha Vantage API.
+    Works even when market is closed by using previous close data.
+    Alpha Vantage free tier: 5 calls/minute, 500 calls/day"""
     if check_rate_limit_cooldown():
         return pd.DataFrame([{
             "ticker": t.upper(),
@@ -107,149 +122,158 @@ def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
         } for t in tickers])
     
     data = []
-    is_market_open, _ = check_market_status()
     
-    for t in tickers:
-        ticker = yf.Ticker(t)
+    # Track API call timing for rate limiting (5 calls per minute for free tier)
+    if 'alpha_vantage_calls' not in st.session_state:
+        st.session_state.alpha_vantage_calls = []
+    
+    # Clean old calls (older than 1 minute)
+    current_time = time.time()
+    st.session_state.alpha_vantage_calls = [
+        call_time for call_time in st.session_state.alpha_vantage_calls
+        if current_time - call_time < 60
+    ]
+    
+    for idx, t in enumerate(tickers):
+        ticker = t.upper()
         last_price = None
         prev_close = None
         volume = None
         currency = "USD"
+        pct_change = None
         
-        logger.info(f"Fetching data for {t}...")
+        logger.info(f"Fetching data for {ticker} from Alpha Vantage... ({idx + 1}/{len(tickers)})")
         
         try:
-            # Method 1: Try info dict first (most reliable, works when market closed)
-            try:
-                # Add timeout protection - use a simple try/except with manual timeout
-                import threading
-                info_result = [None]
-                info_error = [None]
-                
-                def fetch_info():
-                    try:
-                        info_result[0] = ticker.info
-                    except Exception as e:
-                        info_error[0] = e
-                
-                info_thread = threading.Thread(target=fetch_info, daemon=True)
-                info_thread.start()
-                info_thread.join(timeout=5)  # 5 second timeout
-                
-                if info_thread.is_alive():
-                    logger.warning(f"Info fetch timed out for {t}")
-                    info = None
-                elif info_error[0]:
-                    raise info_error[0]
-                else:
-                    info = info_result[0]
-                
-                if info:
-                    # Get current/regular market price
-                    last_price = (
-                        info.get('currentPrice') or 
-                        info.get('regularMarketPrice') or 
-                        info.get('previousClose')  # Use previous close if market closed
-                    )
-                    prev_close = (
-                        info.get('previousClose') or 
-                        info.get('regularMarketPreviousClose')
-                    )
-                    volume = info.get('volume') or info.get('regularMarketVolume') or info.get('regularMarketVolume')
-                    currency = info.get('currency', 'USD')
-                    
-                    # If market is closed and we don't have current price, use previous close
-                    if (last_price is None or pd.isna(last_price)) and prev_close is not None:
-                        last_price = prev_close
-                    logger.info(f"Successfully fetched info for {t}: price={last_price}, prev_close={prev_close}")
-                else:
-                    logger.warning(f"Info fetch returned None for {t}")
-                    
-            except Exception as e:
-                logger.warning(f"Info method failed for {t}: {e}")
+            # Check rate limit before making call
+            current_time = time.time()
+            recent_calls = [
+                call_time for call_time in st.session_state.alpha_vantage_calls
+                if current_time - call_time < 60
+            ]
             
-            # Method 2: Try fast_info if info didn't work
-            if last_price is None or pd.isna(last_price):
-                try:
-                    fast_info = ticker.fast_info
-                    last_price = fast_info.last_price
-                    prev_close = fast_info.previous_close
-                    volume = fast_info.last_volume
-                    if hasattr(fast_info, 'currency'):
-                        currency = fast_info.currency
-                    
-                    # If market closed and no current price, use previous close
-                    if (last_price is None or pd.isna(last_price)) and prev_close is not None:
-                        last_price = prev_close
-                        
-                except Exception as e:
-                    logger.debug(f"Fast_info method failed for {t}: {e}")
+            if len(recent_calls) >= ALPHA_VANTAGE_REQUESTS_PER_MINUTE:
+                # Wait until the oldest call is more than 1 minute old
+                oldest_call = min(recent_calls)
+                wait_time = 60 - (current_time - oldest_call) + 1  # Add 1 second buffer
+                if wait_time > 0:
+                    logger.warning(f"Rate limit reached ({ALPHA_VANTAGE_REQUESTS_PER_MINUTE} calls/min). Waiting {wait_time:.1f} seconds...")
+                    time.sleep(wait_time)
+                    # Clean calls again after waiting
+                    current_time = time.time()
+                    st.session_state.alpha_vantage_calls = [
+                        call_time for call_time in st.session_state.alpha_vantage_calls
+                        if current_time - call_time < 60
+                    ]
             
-            # Method 3: Try history as last resort (slower, more likely to rate limit)
-            if last_price is None or pd.isna(last_price):
-                try:
-                    # Use 5d period to get more reliable data
-                    hist = ticker.history(period="5d", interval="1d")
-                    if not hist.empty:
-                        last_price = hist['Close'].iloc[-1]
-                        if len(hist) > 1:
-                            prev_close = hist['Close'].iloc[-2]
-                        else:
-                            prev_close = last_price
-                        volume = hist['Volume'].iloc[-1] if 'Volume' in hist.columns else None
-                except Exception as e:
-                    logger.debug(f"History method failed for {t}: {e}")
+            # Make API call to Alpha Vantage
+            params = {
+                "function": "GLOBAL_QUOTE",
+                "symbol": ticker,
+                "apikey": ALPHA_VANTAGE_API_KEY
+            }
             
-            # If still no price but we have previous close, use it
-            if (last_price is None or pd.isna(last_price)) and prev_close is not None:
-                last_price = prev_close
+            response = requests.get(ALPHA_VANTAGE_BASE_URL, params=params, timeout=10)
+            response.raise_for_status()
+            result = response.json()
             
-            # Calculate percentage change
-            if last_price is not None and not pd.isna(last_price) and prev_close is not None and not pd.isna(prev_close) and prev_close != 0:
-                pct_change = ((last_price - prev_close) / prev_close) * 100
-            else:
-                pct_change = 0.0
+            # Track this API call
+            st.session_state.alpha_vantage_calls.append(time.time())
             
-            data.append({
-                "ticker": t.upper(),
-                "price": last_price,
-                "prev_close": prev_close,
-                "pct_change": pct_change,
-                "volume": volume,
-                "currency": currency,
-            })
-            
-        except YFRateLimitError as e:
-            logger.warning(f"Rate limited for {t}")
-            # Even if rate limited, try to get at least previous close from cached data
-            try:
-                info = ticker.info
-                prev_close = info.get('previousClose')
-                if prev_close:
-                    data.append({
-                        "ticker": t.upper(),
-                        "price": prev_close,  # Use previous close as fallback
-                        "prev_close": prev_close,
-                        "pct_change": 0.0,
-                        "volume": None,
-                        "currency": info.get('currency', 'USD'),
-                    })
-                else:
-                    raise
-            except:
-                mark_rate_limited()
+            # Check for API errors
+            if "Error Message" in result:
+                error_msg = result["Error Message"]
+                logger.error(f"Alpha Vantage API error for {ticker}: {error_msg}")
+                if "API call frequency" in error_msg or "rate limit" in error_msg.lower():
+                    mark_rate_limited()
                 data.append({
-                    "ticker": t.upper(),
+                    "ticker": ticker,
                     "price": None,
                     "prev_close": None,
                     "pct_change": None,
                     "volume": None,
                     "currency": "N/A",
                 })
-        except Exception as e:
-            logger.error(f"Error fetching data for {t}: {e}")
+                continue
+            
+            if "Note" in result:
+                note = result["Note"]
+                logger.warning(f"Alpha Vantage note for {ticker}: {note}")
+                if "API call frequency" in note or "rate limit" in note.lower():
+                    mark_rate_limited()
+            
+            # Parse the Global Quote response
+            if "Global Quote" in result and result["Global Quote"]:
+                quote = result["Global Quote"]
+                
+                # Extract data from Alpha Vantage response
+                # Alpha Vantage uses keys like "05. price", "08. previous close", etc.
+                try:
+                    price_str = quote.get("05. price", "0")
+                    prev_close_str = quote.get("08. previous close", "0")
+                    change_str = quote.get("09. change", "0")
+                    change_percent_str = quote.get("10. change percent", "0%")
+                    volume_str = quote.get("06. volume", "0")
+                    
+                    # Convert to appropriate types
+                    last_price = float(price_str) if price_str and price_str != "None" else None
+                    prev_close = float(prev_close_str) if prev_close_str and prev_close_str != "None" else None
+                    volume = int(float(volume_str)) if volume_str and volume_str != "None" else None
+                    
+                    # Parse percentage change (format: "X.XX%")
+                    if change_percent_str and change_percent_str != "None":
+                        change_percent_str = change_percent_str.replace("%", "").strip()
+                        pct_change = float(change_percent_str) if change_percent_str else None
+                    else:
+                        # Calculate from price and prev_close if available
+                        if last_price is not None and prev_close is not None and prev_close != 0:
+                            pct_change = ((last_price - prev_close) / prev_close) * 100
+                        else:
+                            pct_change = None
+                    
+                    # If no current price but we have previous close, use it
+                    if (last_price is None or last_price == 0) and prev_close is not None:
+                        last_price = prev_close
+                        pct_change = 0.0
+                    
+                    logger.info(f"Successfully fetched data for {ticker}: price={last_price}, prev_close={prev_close}, pct_change={pct_change}")
+                    
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Error parsing Alpha Vantage response for {ticker}: {e}")
+                    last_price = None
+                    prev_close = None
+                    pct_change = None
+                    volume = None
+            else:
+                logger.warning(f"No Global Quote data in response for {ticker}")
+                last_price = None
+                prev_close = None
+                pct_change = None
+                volume = None
+            
             data.append({
-                "ticker": t.upper(),
+                "ticker": ticker,
+                "price": last_price,
+                "prev_close": prev_close,
+                "pct_change": pct_change if pct_change is not None else 0.0,
+                "volume": volume,
+                "currency": currency,
+            })
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Network error fetching {ticker} from Alpha Vantage: {e}")
+            data.append({
+                "ticker": ticker,
+                "price": None,
+                "prev_close": None,
+                "pct_change": None,
+                "volume": None,
+                "currency": "N/A",
+            })
+        except Exception as e:
+            logger.error(f"Error fetching data for {ticker}: {e}")
+            data.append({
+                "ticker": ticker,
                 "price": None,
                 "prev_close": None,
                 "pct_change": None,
@@ -257,10 +281,14 @@ def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
                 "currency": "N/A",
             })
         
-        # Optimized delay between requests - reduced for faster updates
-        # Only delay if we have multiple tickers to avoid rate limiting
+        # Rate limiting: Small delay between requests to avoid hitting rate limits too quickly
+        # The main rate limiting is handled by checking call history above
         if len(tickers) > 1 and t != tickers[-1]:
-            time.sleep(1)  # Reduced from 3s to 1s for faster updates
+            # Adjust delay based on rate limit - faster for premium tiers
+            if ALPHA_VANTAGE_REQUESTS_PER_MINUTE >= 75:
+                time.sleep(0.2)  # Premium tier - minimal delay
+            else:
+                time.sleep(0.5)  # Free tier - slightly longer delay
     
     return pd.DataFrame(data)
 
@@ -445,208 +473,109 @@ def display_monitoring_table(quotes_df: pd.DataFrame) -> None:
 
 
 def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: Optional[int] = None) -> None:
-    """Plot a segmented vertical bar chart with stocks grouped by percentage change ranges."""
+    """Plot a normal vertical bar chart: one bar per stock, side by side."""
     if quotes_df.empty:
         st.warning(f"No data to plot for {title}")
         return
     
-    # Always use percentage change for the main visualization
     if "pct_change" not in quotes_df.columns or quotes_df["pct_change"].isna().all():
         st.warning("No percentage change data available for selected stocks")
         return
     
-    # Filter out rows with None or NaN values in pct_change
     valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
         st.warning("No valid percentage change data after filtering")
         return
     
-    # Ensure price values are not None (replace None with NaN for consistency)
     valid_data["price"] = valid_data["price"].fillna(pd.NA)
+    valid_data = valid_data.sort_values("pct_change", ascending=True)
     
-    # Define percentage change ranges (slabs)
-    ranges = [
-        (float('-inf'), -5, "-5%+", '#8B0000'),      # Dark red
-        (-5, -2, "-2% to -5%", '#DC143C'),           # Crimson
-        (-2, 0, "0% to -2%", '#FF6347'),            # Tomato
-        (0, 1, "+0% to +1%", '#FFD700'),            # Gold
-        (1, 2, "+1% to +2%", '#FFA500'),            # Orange
-        (2, 5, "+2% to +5%", '#32CD32'),            # Lime green
-        (5, float('inf'), "+5%+", '#00FF00'),        # Bright green
-    ]
+    tickers = valid_data["ticker"].tolist()
+    pct_changes = valid_data["pct_change"].tolist()
+    prices = valid_data["price"].tolist()
     
-    # Group stocks by percentage change ranges
-    range_groups = {range_label: [] for _, _, range_label, _ in ranges}
+    colors = []
+    for pct in pct_changes:
+        if pct > 0:
+            colors.append("#22c55e")
+        elif pct < 0:
+            colors.append("#ef4444")
+        else:
+            colors.append("#94a3b8")
     
-    for _, row in valid_data.iterrows():
+    hover_texts = []
+    for i, row in valid_data.iterrows():
         pct = row["pct_change"]
-        ticker = row["ticker"]
         price = row["price"]
-        
-        # Skip if pct_change is None or NaN (shouldn't happen after filtering, but safety check)
-        if pd.isna(pct):
-            continue
-        
-        # Ensure price is a valid number or None
-        price_val = price if pd.notna(price) else None
-        
-        # Find which range this stock belongs to
-        for min_pct, max_pct, range_label, _ in ranges:
-            if min_pct == float('-inf'):
-                if pct < max_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
-                    break
-            elif max_pct == float('inf'):
-                if pct >= min_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
-                    break
-            else:
-                if min_pct <= pct < max_pct:
-                    range_groups[range_label].append({"ticker": ticker, "pct_change": float(pct), "price": price_val})
-                    break
+        price_str = f"${price:.2f}" if pd.notna(price) else "N/A"
+        hover_texts.append(f"{row['ticker']}<br>Change: {pct:+.2f}%<br>Price: {price_str}")
     
-    # Create stacked vertical bar - all in same line
     fig = go.Figure()
+    # Bar width = half of previous (0.28 -> 0.14); ~5px gap between bars (chart width ~460px)
+    n_bars = len(tickers)
+    gap_px = 5
+    chart_width_px = 460
+    # For ~5px gap: bar width = 1 - (n_bars-1)*gap_px/chart_width_px. Min 0.14 (half of previous 0.28).
+    bar_width_5px = max(0.1, 1 - (n_bars - 1) * gap_px / chart_width_px) if n_bars >= 1 else 0.14
+    bar_width = max(0.14, bar_width_5px)  # at least half-width; wider when needed for 5px gap
+    fig.add_trace(go.Bar(
+        x=tickers,
+        y=pct_changes,
+        width=bar_width,
+        marker=dict(
+            color=colors,
+            line=dict(color="rgba(0,0,0,0.3)", width=1),
+        ),
+        hovertemplate="%{customdata}<extra></extra>",
+        customdata=hover_texts,
+        text=[f"{p:+.2f}%" for p in pct_changes],
+        textposition="outside",
+        textfont=dict(size=10),
+    ))
     
-    y_bottom = 0
-    annotations = []
-    
-    # Build stacked segments from bottom to top - all at x=0 (same vertical line)
-    for min_pct, max_pct, range_label, color in ranges:
-        stocks_in_range = range_groups[range_label]
-        if not stocks_in_range:
-            continue
-        
-        # Calculate segment height (based on number of stocks, with min height)
-        segment_height = max(5, len(stocks_in_range) * 2)  # At least 5 units, 2 per stock
-        y_top = y_bottom + segment_height
-        y_mid = (y_bottom + y_top) / 2
-        
-        # Create the segment - all at x=0 to keep in same vertical line
-        fig.add_trace(go.Bar(
-            x=[0],  # All segments at x=0 (same vertical line)
-            y=[segment_height],
-            base=[y_bottom],
-            name=range_label,
-            marker=dict(
-                color=color,
-                line=dict(color='black', width=2)
-            ),
-            hovertemplate=f"<b>{range_label}</b><br>" +
-                         "<br>".join([
-                             f"{s['ticker']}: " + 
-                             (f"{s['pct_change']:.2f}%" if s['pct_change'] is not None and pd.notna(s['pct_change']) else "N/A") +
-                             " (" +
-                             (f"${s['price']:.2f}" if s['price'] is not None and pd.notna(s['price']) else "N/A") +
-                             ")"
-                             for s in stocks_in_range
-                         ]) +
-                         "<extra></extra>",
-            orientation='v',
-            showlegend=False,
-            width=0.25  # Narrower bar width
-        ))
-        
-        # Add stock labels
-        stock_labels = ", ".join([s['ticker'] for s in stocks_in_range])
-        if len(stock_labels) > 30:
-            # Split into multiple lines if too long
-            tickers = [s['ticker'] for s in stocks_in_range]
-            mid = len(tickers) // 2
-            stock_labels = ", ".join(tickers[:mid]) + "<br>" + ", ".join(tickers[mid:])
-        
-        # Add annotations for stock names and range label
-        annotations.append(dict(
-            x=0.15,
-            y=y_mid,
-            text=stock_labels,
-            showarrow=False,
-            xref="paper",
-            yref="y",
-            font=dict(size=9, color='black'),
-            bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="black",
-            borderwidth=1,
-            borderpad=4,
-            align="left",
-            valign="middle"
-        ))
-        
-        annotations.append(dict(
-            x=0.85,
-            y=y_mid,
-            text=range_label,
-            showarrow=False,
-            xref="paper",
-            yref="y",
-            font=dict(size=9, color='black', weight='bold'),
-            align="right",
-            valign="middle"
-        ))
-        
-        # Add horizontal line at segment boundary
-        if y_bottom > 0:
-            fig.add_shape(
-                type="line",
-                x0=0.0, y0=y_bottom, x1=1.0, y1=y_bottom,
-                line=dict(color="black", width=1.5, dash="dash"),
-                xref="paper",
-                yref="y"
-            )
-        
-        y_bottom = y_top
-    
-    # Add upward arrow
-    if y_bottom > 0:
-        annotations.append(dict(
-            x=0.5,
-            y=y_bottom + 2,
-            text="↑",
-            showarrow=False,
-            xref="paper",
-            yref="y",
-            font=dict(size=30, color='black'),
-            align="center",
-            valign="middle"
-        ))
-    
-    # Calculate height: 20% of typical viewport (approximately 150px for 20% of 750px viewport)
-    # Or use provided height parameter
     if height is None:
-        # Default to 20% of screen - approximately 150-200px
         chart_height = 180
     else:
         chart_height = height
     
+    y_min = min(pct_changes) if pct_changes else -5
+    y_max = max(pct_changes) if pct_changes else 5
+    # Shorter y scale: less padding so bars have better length (tighter range)
+    span = y_max - y_min if y_max != y_min else 1
+    y_pad = max(0.3, span * 0.08)  # was 0.15, now 0.08 for shorter scale
+    y_range = [y_min - y_pad, y_max + y_pad]
+    if 0 < y_min or 0 > y_max:
+        y_range = [min(y_range[0], 0), max(y_range[1], 0)]
+    
     fig.update_layout(
         title=dict(
             text="Stock Performance - Daily Change (%)",
-            font=dict(size=12, family='Arial'),
+            font=dict(size=12, family="Arial"),
             x=0.5,
-            xanchor="center"
+            xanchor="center",
         ),
         xaxis=dict(
             title="",
-            showticklabels=False,
-            range=[-0.2, 0.2],  # Narrow range to keep bar centered
+            tickangle=-45,
             showgrid=False,
             zeroline=False,
-            fixedrange=True
         ),
         yaxis=dict(
-            title="Percentage Change (%)",
+            title="Change (%)",
             showgrid=True,
-            gridcolor='rgba(128,128,128,0.3)',
-            gridwidth=1,
-            tickfont=dict(size=9),
+            gridcolor="rgba(128,128,128,0.3)",
+            zeroline=True,
+            zerolinecolor="rgba(0,0,0,0.5)",
+            zerolinewidth=1,
+            range=y_range,
         ),
         height=chart_height,
-        plot_bgcolor='white',
-        paper_bgcolor='white',
-        margin=dict(l=80, r=80, t=50, b=50),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        margin=dict(l=60, r=40, t=50, b=80),
         showlegend=False,
-        annotations=annotations,
-        barmode='stack',  # Ensure proper stacking
+        bargap=0.05,
+        bargroupgap=0,
     )
     
     st.plotly_chart(fig, use_container_width=True)
