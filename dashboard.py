@@ -534,15 +534,15 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: 
     ))
     
     if height is None:
-        chart_height = 180
+        chart_height = 360
     else:
         chart_height = height
     
     y_min = min(pct_changes) if pct_changes else -5
     y_max = max(pct_changes) if pct_changes else 5
-    # Shorter y scale: less padding so bars have better length (tighter range)
+    # Longer y scale: more padding and 0.1 tick spacing
     span = y_max - y_min if y_max != y_min else 1
-    y_pad = max(0.3, span * 0.08)  # was 0.15, now 0.08 for shorter scale
+    y_pad = max(1.0, span * 0.25)  # more padding so y-axis feels longer
     y_range = [y_min - y_pad, y_max + y_pad]
     if 0 < y_min or 0 > y_max:
         y_range = [min(y_range[0], 0), max(y_range[1], 0)]
@@ -568,6 +568,7 @@ def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: 
             zerolinecolor="rgba(0,0,0,0.5)",
             zerolinewidth=1,
             range=y_range,
+            dtick=0.1,  # 0.1 scale: ticks every 0.1%
         ),
         height=chart_height,
         plot_bgcolor="white",
@@ -825,99 +826,91 @@ def main() -> None:
         if show_monitor:
             display_monitoring_table(valid_quotes)
     
+    # Store for use inside fragments (fragment reruns don't re-execute main)
+    st.session_state._valid_quotes = valid_quotes
+    st.session_state._all_available_stocks = all_available_stocks
+    st.session_state._all_stocks_in_graphs = all_stocks_in_graphs
+    st.session_state._needs_fetch = needs_fetch if 'needs_fetch' in dir() else False
+    
     # Display graphs in a grid layout (2 columns for better viewport usage)
     if st.session_state.graphs:
         num_graphs = len(st.session_state.graphs)
         graphs_per_row = 2
         num_rows = (num_graphs + graphs_per_row - 1) // graphs_per_row
         
-        # Display each graph in grid
+        def render_graph_fragment(graph_idx):
+            """Render one graph block: form keeps multiselect open until 'Update graph' is clicked."""
+            multiselect_key = f"graph_stocks_{graph_idx}"
+            graph = st.session_state.graphs[graph_idx]
+            applied_selection = st.session_state.get(multiselect_key, graph.get("stocks", []))
+            
+            stocks_in_other_graphs = set()
+            for other_idx, other_g in enumerate(st.session_state.graphs):
+                if other_idx != graph_idx:
+                    ok = f"graph_stocks_{other_idx}"
+                    stocks_in_other_graphs.update(st.session_state.get(ok, other_g.get("stocks", [])))
+            
+            all_avail = st.session_state.get("_all_available_stocks", [])
+            available = [s for s in all_avail if s not in stocks_in_other_graphs or s in applied_selection]
+            for s in applied_selection:
+                if s not in available:
+                    available.append(s)
+            available = sorted(available)
+            
+            # Form: no rerun until submit, so multiselect dropdown stays open while selecting
+            with st.form(key=f"graph_form_{graph_idx}", clear_on_submit=False):
+                selected = st.multiselect(
+                    f"Graph {graph_idx + 1} - Select stocks",
+                    options=available,
+                    default=applied_selection,
+                    help="Select multiple stocks (dropdown stays open); click **Update graph** when done.",
+                )
+                if st.form_submit_button("Update graph"):
+                    st.session_state[multiselect_key] = list(selected)
+                    st.session_state.graphs[graph_idx]["stocks"] = list(selected)
+                    st.rerun()
+            
+            graph_stocks = st.session_state.get(multiselect_key, [])
+            valid_quotes = st.session_state.get("_valid_quotes", pd.DataFrame())
+            needs_fetch = st.session_state.get("_needs_fetch", False)
+            all_stocks_in_graphs = bool(st.session_state.get("_all_stocks_in_graphs", set()))
+            
+            if graph_stocks:
+                if valid_quotes.empty:
+                    if needs_fetch and all_stocks_in_graphs:
+                        st.info(f"⏳ Fetching data for {', '.join(graph_stocks)}...")
+                    else:
+                        st.warning("⚠️ No data available. Click 'Refresh Data' or 'Update graph' after selecting.")
+                else:
+                    graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
+                    if graph_quotes.empty:
+                        st.warning(f"⚠️ No data for: {', '.join(graph_stocks)}")
+                    else:
+                        plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=360)
+            else:
+                st.info("👆 Select stocks above, then click **Update graph** to display")
+        
+        # Display each graph in grid; each in its own fragment so only that graph reruns on multiselect
         for row in range(num_rows):
             cols = st.columns(graphs_per_row)
             for col_idx in range(graphs_per_row):
                 graph_idx = row * graphs_per_row + col_idx
                 if graph_idx < num_graphs:
-                    graph = st.session_state.graphs[graph_idx]
                     with cols[col_idx]:
                         with st.container():
-                            # Graph header with stock selection and delete button
-                            col_stocks, col_delete = st.columns([3, 1])
-                            
-                            with col_stocks:
-                                multiselect_key = f"graph_stocks_{graph_idx}"
-                                
-                                # Initialize session state for this multiselect if it doesn't exist
-                                if multiselect_key not in st.session_state:
-                                    st.session_state[multiselect_key] = graph.get("stocks", [])
-                                
-                                # Get the current value from session state (this is the source of truth)
-                                current_selection = st.session_state[multiselect_key]
-                                
-                                # Get stocks selected in OTHER graphs (exclusive selection)
-                                stocks_in_other_graphs = set()
-                                for other_idx, other_graph in enumerate(st.session_state.graphs):
-                                    if other_idx != graph_idx:
-                                        other_key = f"graph_stocks_{other_idx}"
-                                        if other_key in st.session_state:
-                                            stocks_in_other_graphs.update(st.session_state[other_key])
-                                        else:
-                                            stocks_in_other_graphs.update(other_graph.get("stocks", []))
-                                
-                                # Filter available stocks to exclude those in other graphs
-                                # But always include currently selected stocks (so they don't disappear from dropdown)
-                                available_stocks_for_this_graph = [
-                                    stock for stock in all_available_stocks 
-                                    if stock not in stocks_in_other_graphs or stock in current_selection
-                                ]
-                                
-                                # Ensure current selection is maintained (in case of any edge cases)
-                                for stock in current_selection:
-                                    if stock not in available_stocks_for_this_graph:
-                                        available_stocks_for_this_graph.append(stock)
-                                
-                                # Sort to keep order consistent
-                                available_stocks_for_this_graph = sorted(available_stocks_for_this_graph)
-                                
-                                graph_stocks = st.multiselect(
-                                    f"Graph {graph_idx + 1} - Select stocks",
-                                    options=available_stocks_for_this_graph,
-                                    default=current_selection,
-                                    key=multiselect_key
-                                )
-                                
-                                # Update graph state to match session state (multiselect updates session state automatically)
-                                graph["stocks"] = st.session_state[multiselect_key]
-                            
+                            col_header, col_delete = st.columns([3, 1])
                             with col_delete:
                                 st.markdown("<br>", unsafe_allow_html=True)
                                 if st.button("Delete", key=f"delete_{graph_idx}", use_container_width=True):
-                                    # Clean up session state for this graph
-                                    multiselect_key = f"graph_stocks_{graph_idx}"
-                                    if multiselect_key in st.session_state:
-                                        del st.session_state[multiselect_key]
+                                    for k in (f"graph_stocks_{graph_idx}",):
+                                        if k in st.session_state:
+                                            del st.session_state[k]
                                     st.session_state.graphs.pop(graph_idx)
                                     st.rerun()
-                            
-                            # Plot graph - use container to prevent flickering
-                            graph_container = st.container()
-                            with graph_container:
-                                if graph_stocks:
-                                    if valid_quotes.empty:
-                                        # Check if we're currently fetching
-                                        if 'needs_fetch' in locals() and needs_fetch and all_stocks_in_graphs:
-                                            st.info(f"⏳ Fetching data for {', '.join(graph_stocks)}... This may take 10-30 seconds.")
-                                            st.caption("💡 Tip: If this takes too long, try enabling 'Use Demo Data' in the sidebar for testing.")
-                                        else:
-                                            st.warning(f"⚠️ No data available. Click 'Refresh Data' to fetch.")
-                                    else:
-                                        graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
-                                        if graph_quotes.empty:
-                                            st.warning(f"⚠️ No data available for selected stocks: {', '.join(graph_stocks)}")
-                                        else:
-                                            plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=180)
-                                else:
-                                    st.info("👆 Select stocks above to display graph")
-                            
+                            @st.fragment
+                            def graph_block(idx=graph_idx):
+                                render_graph_fragment(idx)
+                            graph_block()
                             st.divider()
         
         # Debug view (collapsed)
