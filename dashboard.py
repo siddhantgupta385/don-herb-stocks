@@ -63,7 +63,7 @@ if 'last_rate_limit_time' not in st.session_state:
 if 'rate_limit_cooldown' not in st.session_state:
     st.session_state.rate_limit_cooldown = False
 if 'graphs' not in st.session_state:
-    st.session_state.graphs = [{"stocks": []}]
+    st.session_state.graphs = [{"stocks": []} for _ in range(12)]
 
 
 def check_rate_limit_cooldown() -> bool:
@@ -294,11 +294,9 @@ def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
 
 
 def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
-    """Generate demo/mock data for testing when API is rate limited.
-    Simulates real-time fluctuations with random variations."""
+    """Generate demo/mock data with meaningful % moves (many ≥10%) for slab charts."""
     import random
-    
-    # Initialize base prices in session state if not exists (for consistency across refreshes)
+
     if 'demo_base_prices' not in st.session_state:
         st.session_state.demo_base_prices = {
             "AAPL": 259.0, "MSFT": 479.0, "GOOGL": 328.0, "AMZN": 247.0,
@@ -308,168 +306,40 @@ def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
             "WMT": 114.0, "HD": 385.0, "MCD": 295.0, "NKE": 95.0,
             "XOM": 118.0, "CVX": 152.0, "SPY": 580.0, "QQQ": 485.0,
         }
-    
-    # Initialize previous prices tracking for realistic fluctuations
     if 'demo_prev_prices' not in st.session_state:
         st.session_state.demo_prev_prices = {}
-    
+
     data = []
-    
     for t in tickers:
         ticker = t.upper()
-        
-        # Get or initialize base price
         if ticker not in st.session_state.demo_base_prices:
             st.session_state.demo_base_prices[ticker] = random.uniform(50, 500)
-        
         base_price = st.session_state.demo_base_prices[ticker]
-        
-        # Get previous price (for realistic fluctuations)
         if ticker in st.session_state.demo_prev_prices:
             prev_price = st.session_state.demo_prev_prices[ticker]
         else:
             prev_price = base_price
             st.session_state.demo_prev_prices[ticker] = prev_price
-        
-        # Simulate real-time fluctuation: small random change from previous price
-        # This creates more realistic "live" updates
-        fluctuation = random.uniform(-0.015, 0.015)  # -1.5% to +1.5% per update
+
+        # Larger fluctuations so many stocks have ≥10% change (for slab visibility)
+        fluctuation = random.uniform(-0.18, 0.18)
         current_price = prev_price * (1 + fluctuation)
-        
-        # Update previous price for next refresh
         st.session_state.demo_prev_prices[ticker] = current_price
-        
-        # Calculate percentage change from base (previous close)
         pct_change = ((current_price - base_price) / base_price) * 100
-        
-        # Ensure price doesn't drift too far from base
-        if abs(pct_change) > 5:
-            current_price = base_price * (1 + random.uniform(-0.05, 0.05))
+        if abs(pct_change) > 25:
+            current_price = base_price * (1 + random.uniform(-0.22, 0.22))
             st.session_state.demo_prev_prices[ticker] = current_price
             pct_change = ((current_price - base_price) / base_price) * 100
-        
-        volume = random.randint(5000000, 100000000)
-        
+
         data.append({
             "ticker": ticker,
             "price": round(current_price, 2),
             "prev_close": round(base_price, 2),
             "pct_change": round(pct_change, 2),
-            "volume": volume,
+            "volume": random.randint(5000000, 100000000),
             "currency": "USD",
         })
-    
     return pd.DataFrame(data)
-
-
-def display_monitoring_table(quotes_df: pd.DataFrame) -> None:
-    """Display a compact monitoring table with real-time stock data and visual indicators."""
-    if quotes_df.empty:
-        return
-    
-    # Sort by percentage change (descending) for better monitoring
-    display_df = quotes_df.copy()
-    display_df = display_df.sort_values('pct_change', ascending=False)
-    
-    # Create styled dataframe for display
-    st.subheader("📊 Real-time Stock Monitor")
-    
-    # Store previous prices for change detection (for visual indicators)
-    if 'previous_prices' not in st.session_state:
-        st.session_state.previous_prices = {}
-    
-    # Prepare display data with enhanced formatting
-    monitor_data = []
-    for _, row in display_df.iterrows():
-        ticker = row['ticker']
-        price = row['price']
-        pct_change = row['pct_change']
-        prev_close = row['prev_close']
-        volume = row['volume']
-        
-        # Track price changes for visual indicators
-        price_change_indicator = ""
-        if ticker in st.session_state.previous_prices:
-            prev_price = st.session_state.previous_prices[ticker]
-            if pd.notna(price) and pd.notna(prev_price):
-                if price > prev_price:
-                    price_change_indicator = "📈"  # Rising
-                elif price < prev_price:
-                    price_change_indicator = "📉"  # Falling
-                else:
-                    price_change_indicator = "➡️"  # Stable
-        st.session_state.previous_prices[ticker] = price
-        
-        # Format price with change indicator
-        if pd.notna(price):
-            price_str = f"{price_change_indicator} ${price:.2f}"
-        else:
-            price_str = "N/A"
-        
-        # Format percentage change with enhanced visual indicators
-        if pd.notna(pct_change):
-            if pct_change > 2:
-                pct_str = f"🟢 🔼 {pct_change:+.2f}%"
-                pct_style = "color: green; font-weight: bold;"
-            elif pct_change > 0:
-                pct_str = f"🟢 {pct_change:+.2f}%"
-                pct_style = "color: green;"
-            elif pct_change < -2:
-                pct_str = f"🔴 🔽 {pct_change:+.2f}%"
-                pct_style = "color: red; font-weight: bold;"
-            elif pct_change < 0:
-                pct_str = f"🔴 {pct_change:+.2f}%"
-                pct_style = "color: red;"
-            else:
-                pct_str = f"⚪ {pct_change:.2f}%"
-                pct_style = "color: gray;"
-        else:
-            pct_str = "N/A"
-            pct_style = ""
-        
-        # Format previous close
-        prev_close_str = f"${prev_close:.2f}" if pd.notna(prev_close) else "N/A"
-        
-        # Format volume
-        if pd.notna(volume):
-            if volume >= 1e6:
-                volume_str = f"{volume/1e6:.2f}M"
-            elif volume >= 1e3:
-                volume_str = f"{volume/1e3:.2f}K"
-            else:
-                volume_str = f"{volume:.0f}"
-        else:
-            volume_str = "N/A"
-        
-        monitor_data.append({
-            "Ticker": ticker,
-            "Price": price_str,
-            "Change %": pct_str,
-            "Prev Close": prev_close_str,
-            "Volume": volume_str,
-            "_sort_pct": pct_change if pd.notna(pct_change) else -999,
-            "_style": pct_style
-        })
-    
-    # Create DataFrame and display
-    monitor_df = pd.DataFrame(monitor_data)
-    monitor_df = monitor_df.sort_values('_sort_pct', ascending=False)
-    monitor_df = monitor_df.drop(columns=['_sort_pct', '_style'])
-    
-    # Display as a styled table with better formatting
-    st.dataframe(
-        monitor_df.set_index("Ticker"),
-        use_container_width=True,
-        height=min(500, len(monitor_df) * 40 + 50),  # Dynamic height
-        hide_index=False
-    )
-    
-    # Show update timestamp
-    if st.session_state.last_update_time:
-        update_time = st.session_state.last_update_time.strftime("%H:%M:%S")
-        st.caption(f"🕐 Last updated: {update_time} | Total stocks: {len(monitor_df)}")
-    
-    st.divider()
 
 
 # Slab order (bottom to top in the single stacked bar)
@@ -536,6 +406,12 @@ def plot_stacked_by_slab(
     valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
         st.warning("No valid percentage change data after filtering")
+        return
+
+    # Only show stocks with at least 10% change (abs)
+    valid_data = valid_data[valid_data["pct_change"].abs() >= 10].copy()
+    if valid_data.empty:
+        st.caption("No stocks with ≥10% change")
         return
 
     valid_data["slab"] = valid_data["pct_change"].apply(get_slab)
@@ -613,7 +489,7 @@ def plot_stacked_by_slab(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Stock Dashboard", layout="wide")
+    st.set_page_config(page_title="Stock Dashboard", layout="wide", initial_sidebar_state="collapsed")
     
     st.title("Stock Dashboard")
     
@@ -632,7 +508,7 @@ def main() -> None:
     st.sidebar.header("⚙️ Settings")
     
     # Demo mode toggle
-    use_demo = st.sidebar.checkbox("🧪 Use Demo Data (for testing)", value=False, help="Enable to use mock data instead of real API calls. Perfect for development when rate limited!")
+    use_demo = st.sidebar.checkbox("🧪 Use Demo Data (for testing)", value=True, help="Enable to use mock data instead of real API calls.")
     
     # Auto-refresh controls
     st.sidebar.divider()
@@ -824,16 +700,6 @@ def main() -> None:
             valid_quotes = pd.DataFrame()
     else:
         valid_quotes = pd.DataFrame()
-    
-    # Display monitoring table if we have data
-    if not valid_quotes.empty:
-        show_monitor = st.sidebar.checkbox(
-            "📊 Show Monitoring Table",
-            value=True,
-            help="Display a compact table view of all stocks for easy monitoring"
-        )
-        if show_monitor:
-            display_monitoring_table(valid_quotes)
     
     # Store for use inside fragments (fragment reruns don't re-execute main)
     st.session_state._valid_quotes = valid_quotes
