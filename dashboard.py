@@ -574,13 +574,13 @@ def plot_stacked_by_slab(
         )
 
     if height is None:
-        height = 260 if compact else 420
+        height = 180 if compact else 420
     chart_title = title if title else "Stock Performance by Slab - Daily Change (%)"
     fig.update_layout(
         barmode="stack",
         title=dict(
             text=chart_title,
-            font=dict(size=10 if compact else 12, family="Arial"),
+            font=dict(size=9 if compact else 12, family="Arial"),
             x=0.5,
             xanchor="center",
         ),
@@ -590,22 +590,22 @@ def plot_stacked_by_slab(
             zeroline=False,
             tickvals=[bar_label],
             ticktext=[bar_label],
-            tickfont=dict(size=9 if compact else 11),
+            tickfont=dict(size=8 if compact else 11),
         ),
         yaxis=dict(
             title="Count" if compact else "Stocks (count)",
             showgrid=True,
             gridcolor="rgba(128,128,128,0.3)",
             zeroline=False,
-            titlefont=dict(size=9 if compact else 11),
-            tickfont=dict(size=8 if compact else 10),
+            titlefont=dict(size=8 if compact else 11),
+            tickfont=dict(size=7 if compact else 10),
         ),
         height=height,
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=40 if compact else 60, r=20 if compact else 40, t=36 if compact else 50, b=36 if compact else 60),
+        margin=dict(l=32 if compact else 60, r=12 if compact else 40, t=28 if compact else 50, b=24 if compact else 60),
         showlegend=not compact,
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=8)),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=7)),
         bargap=0.3,
         bargroupgap=0,
     )
@@ -841,10 +841,15 @@ def main() -> None:
     st.session_state._all_stocks_in_graphs = all_stocks_in_graphs
     st.session_state._needs_fetch = needs_fetch if 'needs_fetch' in dir() else False
 
-    # Multiple graphs in a compact grid (4 per row to fit as many as possible)
+    # Compact grid: 4 per row, small charts + expander for options so 3+ rows fit in viewport
+    st.markdown(
+        "<style>div[data-testid='stExpander'] > div { padding-top: 0.25rem; padding-bottom: 0.25rem; } "
+        ".stButton > button { padding: 0.2rem 0.5rem; font-size: 0.8rem; }</style>",
+        unsafe_allow_html=True,
+    )
     st.subheader("📈 Stock performance by slab")
     GRAPHS_PER_ROW = 4
-    COMPACT_CHART_HEIGHT = 260
+    COMPACT_CHART_HEIGHT = 180
     num_graphs = len(st.session_state.graphs)
     num_rows = (num_graphs + GRAPHS_PER_ROW - 1) // GRAPHS_PER_ROW
 
@@ -858,6 +863,7 @@ def main() -> None:
                 multiselect_key = f"graph_stocks_{graph_idx}"
                 graph = st.session_state.graphs[graph_idx]
                 applied = st.session_state.get(multiselect_key, graph.get("stocks", []))
+                n_stocks = len(applied)
                 stocks_in_other = set()
                 for oi, og in enumerate(st.session_state.graphs):
                     if oi != graph_idx:
@@ -868,17 +874,28 @@ def main() -> None:
                         available.append(s)
                 available = sorted(available)
 
-                with st.form(key=f"graph_form_{graph_idx}", clear_on_submit=False):
-                    sel = st.multiselect(
-                        f"Graph {graph_idx + 1}",
-                        options=available,
-                        default=applied,
-                        key=f"graph_multiselect_{graph_idx}",
-                        help="Select stocks for this graph.",
-                    )
-                    if st.form_submit_button("Update"):
-                        st.session_state[multiselect_key] = list(sel)
-                        st.session_state.graphs[graph_idx]["stocks"] = list(sel)
+                # One short row: expander "G1 (n)" + tiny Delete
+                head_col, del_col = st.columns([1, 0.06])
+                with head_col:
+                    with st.expander(f"**G{graph_idx + 1}** ({n_stocks})", expanded=False):
+                        with st.form(key=f"graph_form_{graph_idx}", clear_on_submit=False):
+                            sel = st.multiselect(
+                                "Stocks",
+                                options=available,
+                                default=applied,
+                                key=f"graph_multiselect_{graph_idx}",
+                                label_visibility="collapsed",
+                            )
+                            if st.form_submit_button("Update"):
+                                st.session_state[multiselect_key] = list(sel)
+                                st.session_state.graphs[graph_idx]["stocks"] = list(sel)
+                                st.rerun()
+                with del_col:
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    if st.button("✕", key=f"delete_{graph_idx}", help="Delete"):
+                        if multiselect_key in st.session_state:
+                            del st.session_state[multiselect_key]
+                        st.session_state.graphs.pop(graph_idx)
                         st.rerun()
 
                 graph_stocks = st.session_state.get(multiselect_key, [])
@@ -891,23 +908,16 @@ def main() -> None:
                     else:
                         gq = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
                         if gq.empty:
-                            st.caption(f"⚠️ No data for selected")
+                            st.caption("⚠️ No data for selected")
                         else:
                             plot_stacked_by_slab(
                                 gq,
                                 height=COMPACT_CHART_HEIGHT,
                                 compact=True,
-                                title=f"Graph {graph_idx + 1}",
+                                title=f"G{graph_idx + 1}",
                             )
                 else:
                     st.caption("Select stocks → Update")
-
-                if st.button("Delete", key=f"delete_{graph_idx}", use_container_width=True):
-                    if multiselect_key in st.session_state:
-                        del st.session_state[multiselect_key]
-                    st.session_state.graphs.pop(graph_idx)
-                    st.rerun()
-                st.divider()
 
     if all_stocks_in_graphs and not valid_quotes.empty:
         with st.expander("📊 View Raw Data", expanded=False):
