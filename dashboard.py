@@ -62,8 +62,6 @@ if 'last_rate_limit_time' not in st.session_state:
     st.session_state.last_rate_limit_time = None
 if 'rate_limit_cooldown' not in st.session_state:
     st.session_state.rate_limit_cooldown = False
-if 'graphs' not in st.session_state:
-    st.session_state.graphs = [{"stocks": []}]  # Start with one graph by default
 
 
 def check_rate_limit_cooldown() -> bool:
@@ -472,113 +470,133 @@ def display_monitoring_table(quotes_df: pd.DataFrame) -> None:
     st.divider()
 
 
-def plot_vertical_bar(quotes_df: pd.DataFrame, metric: str, title: str, height: Optional[int] = None) -> None:
-    """Plot a normal vertical bar chart: one bar per stock, side by side."""
+# Slab order (bottom to top in the single stacked bar)
+SLAB_ORDER = [
+    "Down >2%",
+    "Down 0–2%",
+    "Flat",
+    "Up 0–2%",
+    "Up 2–5%",
+    "Up 5–10%",
+    "Up 10–20%",
+    "Up 20%+",
+]
+
+# Distinct color per slab (like reference: red down, orange/yellow/green up)
+SLAB_COLORS = {
+    "Down >2%": "#dc2626",
+    "Down 0–2%": "#ef4444",
+    "Flat": "#94a3b8",
+    "Up 0–2%": "#22c55e",
+    "Up 2–5%": "#4ade80",
+    "Up 5–10%": "#facc15",
+    "Up 10–20%": "#fb923c",
+    "Up 20%+": "#f97316",
+}
+
+
+def get_slab(pct_change: float) -> str:
+    """Assign slab label from percentage change."""
+    if pd.isna(pct_change):
+        return "Flat"
+    if pct_change < -2:
+        return "Down >2%"
+    if pct_change < 0:
+        return "Down 0–2%"
+    if pct_change == 0:
+        return "Flat"
+    if pct_change <= 2:
+        return "Up 0–2%"
+    if pct_change <= 5:
+        return "Up 2–5%"
+    if pct_change <= 10:
+        return "Up 5–10%"
+    if pct_change <= 20:
+        return "Up 10–20%"
+    return "Up 20%+"
+
+
+def plot_stacked_by_slab(quotes_df: pd.DataFrame, height: Optional[int] = None) -> None:
+    """One vertical bar: all stocks in one bar, stacked by slab (percentage range), each slab a different color."""
     if quotes_df.empty:
-        st.warning(f"No data to plot for {title}")
+        st.warning("No data to plot")
         return
-    
+
     if "pct_change" not in quotes_df.columns or quotes_df["pct_change"].isna().all():
         st.warning("No percentage change data available for selected stocks")
         return
-    
+
     valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
         st.warning("No valid percentage change data after filtering")
         return
-    
+
+    valid_data["slab"] = valid_data["pct_change"].apply(get_slab)
     valid_data["price"] = valid_data["price"].fillna(pd.NA)
-    valid_data = valid_data.sort_values("pct_change", ascending=True)
-    
-    tickers = valid_data["ticker"].tolist()
-    pct_changes = valid_data["pct_change"].tolist()
-    prices = valid_data["price"].tolist()
-    
-    colors = []
-    for pct in pct_changes:
-        if pct > 0:
-            colors.append("#22c55e")
-        elif pct < 0:
-            colors.append("#ef4444")
-        else:
-            colors.append("#94a3b8")
-    
-    hover_texts = []
-    for i, row in valid_data.iterrows():
-        pct = row["pct_change"]
-        price = row["price"]
-        price_str = f"${price:.2f}" if pd.notna(price) else "N/A"
-        hover_texts.append(f"{row['ticker']}<br>Change: {pct:+.2f}%<br>Price: {price_str}")
-    
+
+    # One bar: x = single category
+    bar_label = "Stocks"
     fig = go.Figure()
-    # Bar width = half of previous (0.28 -> 0.14); ~5px gap between bars (chart width ~460px)
-    n_bars = len(tickers)
-    gap_px = 5
-    chart_width_px = 460
-    # For ~5px gap: bar width = 1 - (n_bars-1)*gap_px/chart_width_px. Min 0.14 (half of previous 0.28).
-    bar_width_5px = max(0.1, 1 - (n_bars - 1) * gap_px / chart_width_px) if n_bars >= 1 else 0.14
-    bar_width = max(0.14, bar_width_5px)  # at least half-width; wider when needed for 5px gap
-    fig.add_trace(go.Bar(
-        x=tickers,
-        y=pct_changes,
-        width=bar_width,
-        marker=dict(
-            color=colors,
-            line=dict(color="rgba(0,0,0,0.3)", width=1),
-        ),
-        hovertemplate="%{customdata}<extra></extra>",
-        customdata=hover_texts,
-        text=[f"{p:+.2f}%" for p in pct_changes],
-        textposition="outside",
-        textfont=dict(size=10),
-    ))
-    
-    if height is None:
-        chart_height = 360
-    else:
-        chart_height = height
-    
-    y_min = min(pct_changes) if pct_changes else -5
-    y_max = max(pct_changes) if pct_changes else 5
-    # Longer y scale: more padding and 0.1 tick spacing
-    span = y_max - y_min if y_max != y_min else 1
-    y_pad = max(1.0, span * 0.25)  # more padding so y-axis feels longer
-    y_range = [y_min - y_pad, y_max + y_pad]
-    if 0 < y_min or 0 > y_max:
-        y_range = [min(y_range[0], 0), max(y_range[1], 0)]
-    
+
+    # Add one stacked segment per slab that has stocks (order: bottom to top by slab)
+    for slab in SLAB_ORDER:
+        slab_df = valid_data[valid_data["slab"] == slab]
+        if slab_df.empty:
+            continue
+        count = len(slab_df)
+        tickers_in_slab = ", ".join(slab_df["ticker"].tolist())
+        hover_lines = [f"<b>{slab}</b>", f"Stocks: {tickers_in_slab}", f"Count: {count}"]
+        for _, row in slab_df.iterrows():
+            price_str = f"${row['price']:.2f}" if pd.notna(row["price"]) else "N/A"
+            hover_lines.append(f"{row['ticker']}: {row['pct_change']:+.2f}% · {price_str}")
+        hover_text = "<br>".join(hover_lines)
+        fig.add_trace(
+            go.Bar(
+                x=[bar_label],
+                y=[count],
+                name=slab,
+                marker=dict(
+                    color=SLAB_COLORS.get(slab, "#94a3b8"),
+                    line=dict(color="rgba(0,0,0,0.25)", width=1),
+                ),
+                text=f"{slab}<br>{tickers_in_slab}" if count <= 4 else f"{slab}<br>{tickers_in_slab}",
+                textposition="inside",
+                insidetextanchor="middle",
+                textfont=dict(size=10),
+                hovertemplate=hover_text + "<extra></extra>",
+            )
+        )
+
     fig.update_layout(
+        barmode="stack",
         title=dict(
-            text="Stock Performance - Daily Change (%)",
+            text="Stock Performance by Slab - Daily Change (%)",
             font=dict(size=12, family="Arial"),
             x=0.5,
             xanchor="center",
         ),
         xaxis=dict(
             title="",
-            tickangle=-45,
             showgrid=False,
             zeroline=False,
+            tickvals=[bar_label],
+            ticktext=[bar_label],
         ),
         yaxis=dict(
-            title="Change (%)",
+            title="Stocks (count)",
             showgrid=True,
             gridcolor="rgba(128,128,128,0.3)",
-            zeroline=True,
-            zerolinecolor="rgba(0,0,0,0.5)",
-            zerolinewidth=1,
-            range=y_range,
-            dtick=0.1,  # 0.1 scale: ticks every 0.1%
+            zeroline=False,
         ),
-        height=chart_height,
+        height=height or 420,
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=60, r=40, t=50, b=80),
-        showlegend=False,
-        bargap=0.05,
+        margin=dict(l=60, r=40, t=50, b=60),
+        showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+        bargap=0.3,
         bargroupgap=0,
     )
-    
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -643,32 +661,18 @@ def main() -> None:
         "ORCL", "CRM", "ADBE", "INTC", "AMD", "QCOM",
     ]
     
-    # Track all stocks that have been used in any graph (for dropdown options)
-    # Use a stable set that persists across reruns to keep options list stable
     if 'all_used_stocks_set' not in st.session_state:
         st.session_state.all_used_stocks_set = set()
-    
-    # Get current selections from all graphs
-    current_used_stocks = set()
-    for graph_idx, graph in enumerate(st.session_state.graphs):
-        multiselect_key = f"graph_stocks_{graph_idx}"
-        if multiselect_key in st.session_state:
-            current_used_stocks.update(st.session_state[multiselect_key])
-        else:
-            current_used_stocks.update(graph.get("stocks", []))
-    
-    # Update persistent set (union to keep all previously used stocks)
-    # Check if there are new stocks before updating cache
+    if 'selected_stocks' not in st.session_state:
+        st.session_state.selected_stocks = []
+
+    current_used_stocks = set(st.session_state.get("selected_stocks", []))
     new_stocks = current_used_stocks - st.session_state.all_used_stocks_set
     if new_stocks:
         st.session_state.all_used_stocks_set.update(new_stocks)
-        # Rebuild cached list only when new stocks are added
         st.session_state.all_available_stocks_cached = sorted(list(set(POPULAR_STOCKS + list(st.session_state.all_used_stocks_set))))
-    
-    # Initialize cache if it doesn't exist
     if 'all_available_stocks_cached' not in st.session_state:
         st.session_state.all_available_stocks_cached = sorted(list(set(POPULAR_STOCKS + list(st.session_state.all_used_stocks_set))))
-    
     all_available_stocks = st.session_state.all_available_stocks_cached
     
     # Status bar - only update when data actually changes to prevent flickering
@@ -690,15 +694,7 @@ def main() -> None:
         st.caption(f"📊 Updates: {st.session_state.update_count}")
     
     # Controls section - always visible
-    col_add, col_refresh, col_clear = st.columns([1, 1, 1])
-    
-    with col_add:
-        if st.button("+ Add Graph", use_container_width=True):
-            st.session_state.graphs.append({
-                "stocks": []
-            })
-            st.rerun()
-    
+    col_refresh, col_clear = st.columns([1, 1])
     with col_refresh:
         if st.button("🔄 Refresh Data", use_container_width=True):
             # Clear cache for background refresh (non-blocking)
@@ -715,14 +711,8 @@ def main() -> None:
             st.success("Cache cleared!")
             st.rerun()
     
-    # Get all stocks that are in any graph (from session state for accuracy)
-    all_stocks_in_graphs = set()
-    for graph_idx, graph in enumerate(st.session_state.graphs):
-        multiselect_key = f"graph_stocks_{graph_idx}"
-        if multiselect_key in st.session_state:
-            all_stocks_in_graphs.update(st.session_state[multiselect_key])
-        else:
-            all_stocks_in_graphs.update(graph.get("stocks", []))
+    selected_stocks = st.session_state.get("selected_stocks", [])
+    all_stocks_in_graphs = set(selected_stocks)
     
     # Initialize valid_quotes as empty DataFrame
     valid_quotes = pd.DataFrame()
@@ -831,96 +821,39 @@ def main() -> None:
     st.session_state._all_available_stocks = all_available_stocks
     st.session_state._all_stocks_in_graphs = all_stocks_in_graphs
     st.session_state._needs_fetch = needs_fetch if 'needs_fetch' in dir() else False
-    
-    # Display graphs in a grid layout (2 columns for better viewport usage)
-    if st.session_state.graphs:
-        num_graphs = len(st.session_state.graphs)
-        graphs_per_row = 2
-        num_rows = (num_graphs + graphs_per_row - 1) // graphs_per_row
-        
-        def render_graph_fragment(graph_idx):
-            """Render one graph block: form keeps multiselect open until 'Update graph' is clicked."""
-            multiselect_key = f"graph_stocks_{graph_idx}"
-            graph = st.session_state.graphs[graph_idx]
-            applied_selection = st.session_state.get(multiselect_key, graph.get("stocks", []))
-            
-            stocks_in_other_graphs = set()
-            for other_idx, other_g in enumerate(st.session_state.graphs):
-                if other_idx != graph_idx:
-                    ok = f"graph_stocks_{other_idx}"
-                    stocks_in_other_graphs.update(st.session_state.get(ok, other_g.get("stocks", [])))
-            
-            all_avail = st.session_state.get("_all_available_stocks", [])
-            available = [s for s in all_avail if s not in stocks_in_other_graphs or s in applied_selection]
-            for s in applied_selection:
-                if s not in available:
-                    available.append(s)
-            available = sorted(available)
-            
-            # Form: no rerun until submit, so multiselect dropdown stays open while selecting
-            with st.form(key=f"graph_form_{graph_idx}", clear_on_submit=False):
-                selected = st.multiselect(
-                    f"Graph {graph_idx + 1} - Select stocks",
-                    options=available,
-                    default=applied_selection,
-                    help="Select multiple stocks (dropdown stays open); click **Update graph** when done.",
-                )
-                if st.form_submit_button("Update graph"):
-                    st.session_state[multiselect_key] = list(selected)
-                    st.session_state.graphs[graph_idx]["stocks"] = list(selected)
-                    st.rerun()
-            
-            graph_stocks = st.session_state.get(multiselect_key, [])
-            valid_quotes = st.session_state.get("_valid_quotes", pd.DataFrame())
-            needs_fetch = st.session_state.get("_needs_fetch", False)
-            all_stocks_in_graphs = bool(st.session_state.get("_all_stocks_in_graphs", set()))
-            
-            if graph_stocks:
-                if valid_quotes.empty:
-                    if needs_fetch and all_stocks_in_graphs:
-                        st.info(f"⏳ Fetching data for {', '.join(graph_stocks)}...")
-                    else:
-                        st.warning("⚠️ No data available. Click 'Refresh Data' or 'Update graph' after selecting.")
-                else:
-                    graph_quotes = valid_quotes[valid_quotes["ticker"].isin(graph_stocks)].copy()
-                    if graph_quotes.empty:
-                        st.warning(f"⚠️ No data for: {', '.join(graph_stocks)}")
-                    else:
-                        plot_vertical_bar(graph_quotes, "pct_change", f"Graph {graph_idx + 1} - Stock Performance", height=360)
+
+    # Single graph: stocks stacked by slab
+    st.subheader("📈 Stock performance by slab")
+    selected = st.multiselect(
+        "Select stocks",
+        options=all_available_stocks,
+        default=selected_stocks,
+        key="selected_stocks",
+        help="Stocks are grouped by % change slab and stacked in one vertical chart.",
+    )
+
+    if selected:
+        if valid_quotes.empty:
+            if st.session_state.get("_needs_fetch", False) and all_stocks_in_graphs:
+                st.info(f"⏳ Fetching data for {', '.join(selected)}...")
             else:
-                st.info("👆 Select stocks above, then click **Update graph** to display")
-        
-        # Display each graph in grid; each in its own fragment so only that graph reruns on multiselect
-        for row in range(num_rows):
-            cols = st.columns(graphs_per_row)
-            for col_idx in range(graphs_per_row):
-                graph_idx = row * graphs_per_row + col_idx
-                if graph_idx < num_graphs:
-                    with cols[col_idx]:
-                        with st.container():
-                            col_header, col_delete = st.columns([3, 1])
-                            with col_delete:
-                                st.markdown("<br>", unsafe_allow_html=True)
-                                if st.button("Delete", key=f"delete_{graph_idx}", use_container_width=True):
-                                    for k in (f"graph_stocks_{graph_idx}",):
-                                        if k in st.session_state:
-                                            del st.session_state[k]
-                                    st.session_state.graphs.pop(graph_idx)
-                                    st.rerun()
-                            @st.fragment
-                            def graph_block(idx=graph_idx):
-                                render_graph_fragment(idx)
-                            graph_block()
-                            st.divider()
-        
-        # Debug view (collapsed)
-        if all_stocks_in_graphs and not valid_quotes.empty:
-            with st.expander("📊 View Raw Data", expanded=False):
-                display_quotes = valid_quotes.copy()
-                display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
-                display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
-                display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
-                st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
+                st.warning("⚠️ No data available. Click 'Refresh Data' after selecting.")
+        else:
+            graph_quotes = valid_quotes[valid_quotes["ticker"].isin(selected)].copy()
+            if graph_quotes.empty:
+                st.warning(f"⚠️ No data for: {', '.join(selected)}")
+            else:
+                plot_stacked_by_slab(graph_quotes, height=420)
+    else:
+        st.info("👆 Select stocks above to see the stacked-by-slab chart.")
+
+    if all_stocks_in_graphs and not valid_quotes.empty:
+        with st.expander("📊 View Raw Data", expanded=False):
+            display_quotes = valid_quotes.copy()
+            display_quotes["price"] = display_quotes["price"].apply(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+            display_quotes["pct_change"] = display_quotes["pct_change"].apply(lambda x: f"{x:.2f}%" if pd.notna(x) else "N/A")
+            display_quotes["volume"] = display_quotes["volume"].apply(lambda x: f"{x/1e6:.2f}M" if pd.notna(x) and x >= 1e6 else f"{x/1e3:.2f}K" if pd.notna(x) and x >= 1e3 else "N/A" if pd.isna(x) else f"{x:.0f}")
+            st.dataframe(display_quotes.set_index("ticker"), use_container_width=True)
     
     # Auto-refresh mechanism using streamlit-autorefresh (reliable method)
     if st.session_state.auto_refresh_enabled and all_stocks_in_graphs:
