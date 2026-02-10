@@ -452,11 +452,16 @@ def plot_stacked_by_slab(
     if height is None:
         height = 180 if compact else 420
     chart_title = title if title else "Stock Performance by Slab - Daily Change (%)"
+    # Use native int/float for layout to avoid Plotly serialization errors
+    margin_l = 32 if compact else 60
+    margin_r = 12 if compact else 40
+    margin_t = 28 if compact else 50
+    margin_b = 24 if compact else 60
     fig.update_layout(
         barmode="stack",
         title=dict(
-            text=chart_title,
-            font=dict(size=9 if compact else 12, family="Arial"),
+            text=str(chart_title),
+            font=dict(size=int(9 if compact else 12), family="Arial"),
             x=0.5,
             xanchor="center",
         ),
@@ -466,24 +471,23 @@ def plot_stacked_by_slab(
             zeroline=False,
             tickvals=[bar_label],
             ticktext=[bar_label],
-            tickfont=dict(size=8 if compact else 11),
+            tickfont=dict(size=int(8 if compact else 11)),
         ),
         yaxis=dict(
             title="Count" if compact else "Stocks (count)",
             showgrid=True,
             gridcolor="rgba(128,128,128,0.3)",
             zeroline=False,
-            titlefont=dict(size=8 if compact else 11),
-            tickfont=dict(size=7 if compact else 10),
+            titlefont=dict(size=int(8 if compact else 11)),
+            tickfont=dict(size=int(7 if compact else 10)),
         ),
-        height=height,
+        height=int(height),
         plot_bgcolor="white",
         paper_bgcolor="white",
-        margin=dict(l=32 if compact else 60, r=12 if compact else 40, t=28 if compact else 50, b=24 if compact else 60),
+        margin=dict(l=int(margin_l), r=int(margin_r), t=int(margin_t), b=int(margin_b)),
         showlegend=not compact,
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=7)),
         bargap=0.3,
-        bargroupgap=0,
     )
     st.plotly_chart(fig, use_container_width=True)
 
