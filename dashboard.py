@@ -62,8 +62,51 @@ if 'last_rate_limit_time' not in st.session_state:
     st.session_state.last_rate_limit_time = None
 if 'rate_limit_cooldown' not in st.session_state:
     st.session_state.rate_limit_cooldown = False
+
+# Default sample stocks assigned to different slabs to cover all percentage bands
+# Each stock is assigned a target percentage range to ensure all slabs are covered
+DEFAULT_SAMPLE_STOCKS_BY_SLAB = {
+    "<10%": ["AAPL", "MSFT", "GOOGL", "AMZN"],  # 0-9% range
+    "10–20%": ["META", "NVDA", "TSLA", "NFLX"],  # 10-19% range
+    "20–30%": ["JPM", "BAC", "WFC", "GS"],  # 20-29% range
+    "30–40%": ["JNJ", "PFE", "UNH", "ABBV"],  # 30-39% range
+    "40%+": ["WMT", "HD", "MCD", "NKE"],  # 40%+ range
+}
+
+# Initialize 12 graphs with sample stocks covering all slabs
+def get_default_graphs():
+    """Create 12 graphs with stocks distributed across all slabs to ensure all slabs are visible."""
+    # Flatten all stocks into a single list, maintaining order by slab
+    all_stocks = []
+    for slab_stocks in DEFAULT_SAMPLE_STOCKS_BY_SLAB.values():
+        all_stocks.extend(slab_stocks)
+    
+    graphs = []
+    # Distribute stocks across 12 graphs (20 stocks total, so some graphs get 1, some get 2)
+    stocks_per_graph = len(all_stocks) // 12  # 1 stock per graph
+    remainder = len(all_stocks) % 12  # 8 extra stocks to distribute
+    
+    stock_idx = 0
+    for graph_num in range(12):
+        graph_stocks = []
+        # First 8 graphs get 2 stocks, remaining get 1 stock
+        num_stocks_for_this_graph = stocks_per_graph + (1 if graph_num < remainder else 0)
+        for _ in range(num_stocks_for_this_graph):
+            if stock_idx < len(all_stocks):
+                graph_stocks.append(all_stocks[stock_idx])
+                stock_idx += 1
+        graphs.append({"stocks": graph_stocks})
+    
+    return graphs
+
 if 'graphs' not in st.session_state:
-    st.session_state.graphs = [{"stocks": []} for _ in range(12)]
+    default_graphs = get_default_graphs()
+    st.session_state.graphs = default_graphs
+    # Initialize session_state keys for each graph's stocks
+    for idx, graph in enumerate(default_graphs):
+        key = f"graph_stocks_{idx}"
+        if key not in st.session_state:
+            st.session_state[key] = graph.get("stocks", [])
 
 
 def check_rate_limit_cooldown() -> bool:
@@ -294,8 +337,22 @@ def fetch_current_quotes(tickers: List[str]) -> pd.DataFrame:
 
 
 def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
-    """Generate demo/mock data with meaningful % moves (many ≥10%) for slab charts."""
+    """Generate demo/mock data with stocks assigned to specific slabs to cover all percentage bands."""
     import random
+
+    # Map stocks to their target percentage ranges (to ensure all slabs are covered)
+    STOCK_TARGET_PCT_RANGES = {
+        # <10% slab (0-9%)
+        "AAPL": (2.5, 7.5), "MSFT": (1.0, 8.0), "GOOGL": (3.0, 9.0), "AMZN": (0.5, 8.5),
+        # 10-20% slab (10-19%)
+        "META": (12.0, 18.0), "NVDA": (10.5, 17.5), "TSLA": (11.0, 19.0), "NFLX": (13.0, 18.5),
+        # 20-30% slab (20-29%)
+        "JPM": (22.0, 28.0), "BAC": (20.5, 27.5), "WFC": (21.0, 29.0), "GS": (23.0, 28.5),
+        # 30-40% slab (30-39%)
+        "JNJ": (32.0, 38.0), "PFE": (30.5, 37.5), "UNH": (31.0, 39.0), "ABBV": (33.0, 38.5),
+        # 40%+ slab (40%+)
+        "WMT": (42.0, 48.0), "HD": (40.5, 47.5), "MCD": (41.0, 49.0), "NKE": (43.0, 48.5),
+    }
 
     if 'demo_base_prices' not in st.session_state:
         st.session_state.demo_base_prices = {
@@ -315,21 +372,24 @@ def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
         if ticker not in st.session_state.demo_base_prices:
             st.session_state.demo_base_prices[ticker] = random.uniform(50, 500)
         base_price = st.session_state.demo_base_prices[ticker]
-        if ticker in st.session_state.demo_prev_prices:
-            prev_price = st.session_state.demo_prev_prices[ticker]
+        
+        # Determine target percentage change based on stock assignment
+        if ticker in STOCK_TARGET_PCT_RANGES:
+            # Use assigned range for this stock
+            pct_min, pct_max = STOCK_TARGET_PCT_RANGES[ticker]
+            target_pct_change = random.uniform(pct_min, pct_max)
+            # Randomly make it positive or negative (but keep absolute value in range)
+            if random.random() < 0.5:
+                target_pct_change = -target_pct_change
         else:
-            prev_price = base_price
-            st.session_state.demo_prev_prices[ticker] = prev_price
-
-        # Larger fluctuations so many stocks have ≥10% change (for slab visibility)
-        fluctuation = random.uniform(-0.18, 0.18)
-        current_price = prev_price * (1 + fluctuation)
+            # For stocks not in the mapping, use random percentage
+            target_pct_change = random.uniform(-18.0, 18.0)
+        
+        # Calculate current price from target percentage change
+        current_price = base_price * (1 + target_pct_change / 100.0)
         st.session_state.demo_prev_prices[ticker] = current_price
-        pct_change = ((current_price - base_price) / base_price) * 100
-        if abs(pct_change) > 25:
-            current_price = base_price * (1 + random.uniform(-0.22, 0.22))
-            st.session_state.demo_prev_prices[ticker] = current_price
-            pct_change = ((current_price - base_price) / base_price) * 100
+        
+        pct_change = target_pct_change
 
         data.append({
             "ticker": ticker,
@@ -342,50 +402,39 @@ def generate_demo_data(tickers: List[str]) -> pd.DataFrame:
     return pd.DataFrame(data)
 
 
-# Slab order (bottom to top in the single stacked bar)
+# Percentage bands (bottom to top in the single stacked bar), based on absolute move
 SLAB_ORDER = [
-    "Down >2%",
-    "Down 0–2%",
-    "Flat",
-    "Up 0–2%",
-    "Up 2–5%",
-    "Up 5–10%",
-    "Up 10–20%",
-    "Up 20%+",
+    "<10%",
+    "10–20%",
+    "20–30%",
+    "30–40%",
+    "40%+",
 ]
 
-# Distinct color per slab (like reference: red down, orange/yellow/green up)
+# Uniform color per band so all stocks in the same percentage band share the same color
 SLAB_COLORS = {
-    "Down >2%": "#dc2626",
-    "Down 0–2%": "#ef4444",
-    "Flat": "#94a3b8",
-    "Up 0–2%": "#22c55e",
-    "Up 2–5%": "#4ade80",
-    "Up 5–10%": "#facc15",
-    "Up 10–20%": "#fb923c",
-    "Up 20%+": "#f97316",
+    "<10%": "#dc2626",     # red
+    "10–20%": "#f97316",   # orange
+    "20–30%": "#facc15",   # yellow
+    "30–40%": "#22c55e",   # green
+    "40%+": "#0ea5e9",     # blue
 }
 
 
 def get_slab(pct_change: float) -> str:
-    """Assign slab label from percentage change."""
+    """Assign slab label from absolute percentage change."""
     if pd.isna(pct_change):
-        return "Flat"
-    if pct_change < -2:
-        return "Down >2%"
-    if pct_change < 0:
-        return "Down 0–2%"
-    if pct_change == 0:
-        return "Flat"
-    if pct_change <= 2:
-        return "Up 0–2%"
-    if pct_change <= 5:
-        return "Up 2–5%"
-    if pct_change <= 10:
-        return "Up 5–10%"
-    if pct_change <= 20:
-        return "Up 10–20%"
-    return "Up 20%+"
+        return "<10%"
+    pct_abs = abs(pct_change)
+    if pct_abs < 10:
+        return "<10%"
+    if pct_abs < 20:
+        return "10–20%"
+    if pct_abs < 30:
+        return "20–30%"
+    if pct_abs < 40:
+        return "30–40%"
+    return "40%+"
 
 
 def plot_stacked_by_slab(
@@ -406,12 +455,6 @@ def plot_stacked_by_slab(
     valid_data = quotes_df[~quotes_df["pct_change"].isna()].copy()
     if valid_data.empty:
         st.warning("No valid percentage change data after filtering")
-        return
-
-    # Only show stocks with at least 10% change (abs)
-    valid_data = valid_data[valid_data["pct_change"].abs() >= 10].copy()
-    if valid_data.empty:
-        st.caption("No stocks with ≥10% change")
         return
 
     valid_data["slab"] = valid_data["pct_change"].apply(get_slab)
